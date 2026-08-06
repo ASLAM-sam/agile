@@ -1,0 +1,70 @@
+# Aegis AI — full stack.
+#
+#   cp backend/.env.example backend/.env    # then set ANTHROPIC_API_KEY
+#   docker compose --env-file ./backend/.env up --build
+#
+# Configuration lives in backend/.env because the backend is the only component
+# that reads it. Compose looks for a `.env` beside this file, so it has to be
+# pointed at the real one with --env-file.
+#
+# Web client:  http://localhost:5173
+# API docs:    http://localhost:8000/docs
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aegis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegis_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aegis}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aegis} -d ${POSTGRES_DB:-aegis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aegis}:${POSTGRES_PASSWORD:-aegis_password}@db:5432/${POSTGRES_DB:-aegis}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set in .env}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-console}
+      LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
+      LLM_EFFORT: ${LLM_EFFORT:-high}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-4}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      ARTIFACT_ROOT: /app/artifacts
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - artifacts:/app/artifacts
+
+  web:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-5173}:80"
+
+volumes:
+  postgres_data:
+  artifacts:
