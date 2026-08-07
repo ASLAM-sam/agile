@@ -9,6 +9,7 @@ import { LoginPage } from '@/pages/LoginPage';
 import { NewProjectPage } from '@/pages/NewProjectPage';
 import { ProjectDetailPage } from '@/pages/ProjectDetailPage';
 import { ProjectsPage } from '@/pages/ProjectsPage';
+import { ProvidersPage } from '@/pages/ProvidersPage';
 import { RegisterPage } from '@/pages/RegisterPage';
 import { RunDetailPage } from '@/pages/RunDetailPage';
 import { RunsPage } from '@/pages/RunsPage';
@@ -37,6 +38,7 @@ export function App() {
               <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
               <Route path="/runs" element={<RunsPage />} />
               <Route path="/runs/:runId" element={<RunDetailPage />} />
+              <Route path="/providers" element={<ProvidersPage />} />
               <Route path="/team" element={<TeamPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>

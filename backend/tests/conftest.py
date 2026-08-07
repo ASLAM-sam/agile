@@ -33,10 +33,25 @@ from app.adapters.registry import build_default_registry
 from app.agents.registry import AgentRegistry
 from app.db.base import Base
 from app.db.session import get_session
+from app.llm.factory import reset_llm_provider
 from app.llm.types import Completion, PromptBundle, TextCompletion, TokenUsage
 from app.main import create_app
 from app.models import User as User  # Re-exported so the ORM registers metadata.
 from app.workflow.memory import SharedProjectMemory
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_manager():
+    """Rebuild the shared provider manager for every test.
+
+    The manager is a process-wide singleton in production, which is correct:
+    cooldowns and the prompt cache have to outlive a run. In a test suite that
+    same lifetime leaks — one test's monkeypatched settings, cooled-down
+    provider or cached response would silently decide the next test's result.
+    """
+    reset_llm_provider()
+    yield
+    reset_llm_provider()
 
 
 @pytest_asyncio.fixture

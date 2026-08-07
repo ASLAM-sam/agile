@@ -45,6 +45,15 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    to: '/providers',
+    label: 'Providers',
+    icon: (
+      <svg className={ICON_CLASS} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.7} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3V6a3 3 0 013-3h13.5a3 3 0 013 3v5.25a3 3 0 01-3 3m-16.5 0v2.25a3 3 0 003 3h13.5a3 3 0 003-3V14.25M6.75 6.75h.008v.008H6.75V6.75zm0 10.5h.008v.008H6.75v-.008z" />
+      </svg>
+    ),
+  },
+  {
     to: '/team',
     label: 'AI Team',
     icon: (

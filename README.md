@@ -313,7 +313,7 @@ aegis/
 │   │   ├── workflow/          Memory, planner, engine, events
 │   │   └── main.py
 │   ├── alembic/               Migrations
-│   ├── tests/                 219 tests
+│   ├── tests/                 291 tests
 │   ├── .env.example           Annotated configuration → copy to backend/.env
 │   └── pyproject.toml
 ├── frontend/
@@ -355,7 +355,7 @@ sees a single origin and CORS never enters the local development loop.
 ## Testing
 
 ```bash
-cd backend && pytest -q                    # 219 tests
+cd backend && pytest -q                    # 291 tests
 cd backend && pytest --cov=app             # with coverage
 cd frontend && npm test                    # 43 tests
 ```
@@ -378,7 +378,11 @@ essentials:
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `LLM_PROVIDER` | Which model provider the agents use: `anthropic` or `gemini`. | `anthropic` |
+| `LLM_PROVIDER` | Preferred provider: `anthropic`, `gemini`, `groq`, `openai` or `ollama`. Others remain as fallbacks. | `anthropic` |
+| `LLM_PROVIDER_PRIORITY` | Fallback order after the preferred one. | `gemini,groq,ollama,openai,anthropic` |
+| `GROQ_API_KEY` | Enables Groq. Free tier at [console.groq.com](https://console.groq.com/keys). | — |
+| `LLM_FAILOVER_ENABLED` | Move to the next provider on quota, auth or outage. | `true` |
+| `LLM_CACHE_ENABLED` | Serve identical prompts from memory. | `true` |
 | `ANTHROPIC_API_KEY` | Required when the provider is `anthropic`. | — |
 | `GOOGLE_API_KEY` | Required when the provider is `gemini`. Free-tier keys from [AI Studio](https://aistudio.google.com/apikey). | — |
 | `SECRET_KEY` | JWT signing key. Generate a fresh one. | random per process |
@@ -389,21 +393,27 @@ essentials:
 Only the selected provider's key is needed. Generation is disabled without it;
 the rest of the platform still runs so the interface stays browsable.
 
-### Choosing a provider
+### Providers and failover
 
-Both implement the same `LLMProvider` interface, so no agent, adapter or
-workflow code differs between them.
+Five providers are supported. `LLM_PROVIDER` names the one tried first; every
+other provider holding credentials stays behind it as an automatic fallback.
 
-| | Anthropic | Gemini |
+| Provider | Cost | Notes |
 |---|---|---|
-| Cost | Paid credit required | Free tier available |
-| Schema enforcement | `output_config.format` | `response_json_schema` |
-| Thinking | `effort` levels honoured | Model sizes its own budget; `LLM_EFFORT` ignored |
-| Prompt caching | Yes, on the stable system prefix | Not used |
+| Gemini | Free tier | Server-enforced JSON Schema. Free tier caps requests per day. |
+| Groq | Free tier | Fast. Good fallback for documentation and summaries. |
+| Ollama | Free, local | Needs `ollama serve`; set `OLLAMA_ENABLED=true`. |
+| OpenAI | Paid | Server-enforced JSON Schema. |
+| Anthropic | Paid | Server-enforced JSON Schema, prompt caching. |
 
-The free Gemini tier enforces per-minute and per-day request limits. A long
-generation run makes many calls, so if it stops with a quota message, lower
-`GENERATION_BATCH_SIZE` and `MAX_CONCURRENT_RUNS` and start it again.
+**Configure at least two.** A single provider has nothing to fail over to, and
+free tiers run out mid-run. Gemini plus Groq costs nothing and keeps a run alive
+when either hits its cap.
+
+When a provider hits a quota, is rejected, or goes down, the manager moves to
+the next one and cools the failed one down so the rest of the run stops paying
+to rediscover it. Nothing has to be retried by hand. The **Providers** page
+shows what happened.
 | `LLM_EFFORT` | Reasoning depth: `low` … `max`. | `high` |
 | `MAX_CONCURRENT_RUNS` | Runs permitted in flight at once. | `4` |
 | `ENVIRONMENT` | `development` \| `staging` \| `production` | `development` |

@@ -342,3 +342,68 @@ export interface HealthStatus {
   llm_configured: boolean;
   active_runs: number;
 }
+
+/** Live health for one model provider, from `GET /providers`. */
+export interface ProviderHealth {
+  key: string;
+  display_name: string;
+  model: string;
+  priority: number;
+  status: 'healthy' | 'degraded' | 'cooling_down' | 'unconfigured' | 'disabled';
+  enabled: boolean;
+  configured: boolean;
+  selectable: boolean;
+  requests: number;
+  successes: number;
+  failures: number;
+  retries: number;
+  failovers_from: number;
+  failovers_to: number;
+  success_rate: number;
+  consecutive_failures: number;
+  latency_ms: number;
+  last_latency_ms: number;
+  last_error: string;
+  last_error_kind: string;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  cooldown_remaining_seconds: number;
+  cooldown_reason: string;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface CacheStats {
+  hits: number;
+  misses: number;
+  stores: number;
+  evictions: number;
+  lookups: number;
+  hit_rate: number;
+}
+
+export interface ProviderTotals {
+  requests: number;
+  successes: number;
+  failures: number;
+  retries: number;
+  failovers: number;
+  cache_hits: number;
+  cache_misses: number;
+  cache_hit_rate: number;
+  success_rate: number;
+  active_provider: string;
+}
+
+export interface ProviderDashboard {
+  providers: ProviderHealth[];
+  totals: ProviderTotals;
+  cache: CacheStats;
+  priority: string[];
+  available_providers: string[];
+  active_provider: string;
+  failover_enabled: boolean;
+  task_routing_enabled: boolean;
+  cache_enabled: boolean;
+  retry_limit: number;
+}

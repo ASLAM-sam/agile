@@ -17,6 +17,7 @@ from google.genai import types as genai_types
 from app.core.exceptions import ConfigurationError, LLMError
 from app.llm.factory import build_llm_provider
 from app.llm.gemini import GeminiClient
+from app.llm.manager import ProviderManager
 from app.llm.protocol import LLMProvider
 from app.llm.schema import array, obj, string
 from app.llm.types import PromptBundle
@@ -87,22 +88,58 @@ def script(client: GeminiClient, chunks: list[Any], captured: dict[str, Any] | N
 
 
 class TestProviderSelection:
-    """`LLM_PROVIDER` decides the class; nothing else needs to know."""
+    """`LLM_PROVIDER` names the *preferred* provider, not the only one.
+
+    The factory returns the shared `ProviderManager` rather than a concrete
+    client: every configured provider stays reachable behind the preferred one,
+    which is what lets a run continue when the preferred one hits its quota.
+    """
 
     def test_gemini_client_satisfies_the_protocol(self, client: GeminiClient) -> None:
         assert isinstance(client, LLMProvider)
 
-    def test_factory_builds_gemini_when_selected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_the_factory_returns_the_shared_manager(self) -> None:
+        manager = build_llm_provider()
+        assert isinstance(manager, ProviderManager)
+        # Sharing is the point: cooldowns and the prompt cache are worthless
+        # if a fresh manager is built per request.
+        assert build_llm_provider() is manager
+
+    def test_the_manager_satisfies_the_protocol_agents_depend_on(self) -> None:
+        assert isinstance(build_llm_provider(), LLMProvider)
+
+    @pytest.mark.parametrize(
+        "preferred, key_attribute, key_value",
+        [
+            ("gemini", "google_api_key", "test-key"),
+            ("anthropic", "anthropic_api_key", "sk-ant-test"),
+            ("groq", "groq_api_key", "gsk-test"),
+        ],
+    )
+    def test_the_preferred_provider_leads_the_routing_order(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        preferred: str,
+        key_attribute: str,
+        key_value: str,
+    ) -> None:
+        monkeypatch.setattr("app.core.config.settings.llm_provider", preferred)
+        monkeypatch.setattr(f"app.core.config.settings.{key_attribute}", key_value)
+
+        snapshot = build_llm_provider().stats_snapshot()
+        assert snapshot["priority"][0] == preferred
+        assert preferred in snapshot["available_providers"]
+
+    def test_the_other_providers_remain_behind_the_preferred_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr("app.core.config.settings.llm_provider", "gemini")
         monkeypatch.setattr("app.core.config.settings.google_api_key", "test-key")
-        assert isinstance(build_llm_provider(), GeminiClient)
+        monkeypatch.setattr("app.core.config.settings.groq_api_key", "gsk-test")
 
-    def test_factory_builds_anthropic_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from app.llm.client import LLMClient
-
-        monkeypatch.setattr("app.core.config.settings.llm_provider", "anthropic")
-        monkeypatch.setattr("app.core.config.settings.anthropic_api_key", "sk-ant-test")
-        assert isinstance(build_llm_provider(), LLMClient)
+        snapshot = build_llm_provider().stats_snapshot()
+        assert snapshot["priority"][0] == "gemini"
+        assert "groq" in snapshot["priority"], "a fallback must still be reachable"
 
     def test_a_missing_key_names_the_variable_and_where_to_get_one(
         self, monkeypatch: pytest.MonkeyPatch

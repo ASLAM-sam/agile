@@ -48,6 +48,73 @@ class AgentRole(StrEnum):
     ARTIFACT_MANAGER = "artifact_manager"
 
 
+class ProviderStatus(StrEnum):
+    """Live health of a single model provider."""
+
+    #: Serving normally.
+    HEALTHY = "healthy"
+    #: Serving, but recent failures suggest it may not keep doing so.
+    DEGRADED = "degraded"
+    #: Temporarily withdrawn from routing after a quota or repeated failures.
+    COOLING_DOWN = "cooling_down"
+    #: Present but missing credentials, so it can never be selected.
+    UNCONFIGURED = "unconfigured"
+    #: Switched off by configuration.
+    DISABLED = "disabled"
+
+    @property
+    def is_selectable(self) -> bool:
+        return self in {ProviderStatus.HEALTHY, ProviderStatus.DEGRADED}
+
+
+class ErrorKind(StrEnum):
+    """What the provider manager should do about a failure.
+
+    The distinction that matters is *whose fault it is*. A timeout is worth
+    another attempt at the same provider; an exhausted quota is worth a
+    different provider; a malformed request is worth neither, because every
+    provider will reject it identically and trying them all just burns quota.
+    """
+
+    #: Transient. Retry the same provider.
+    RETRYABLE = "retryable"
+    #: Rate limited or out of quota. Move on and cool this provider down.
+    QUOTA = "quota"
+    #: Credentials rejected. Move on; retrying cannot help.
+    AUTH = "auth"
+    #: Model or endpoint missing. Move on.
+    UNAVAILABLE = "unavailable"
+    #: The request itself is wrong. Fail fast — do not spend other providers.
+    FATAL = "fatal"
+
+    @property
+    def should_retry(self) -> bool:
+        return self is ErrorKind.RETRYABLE
+
+    @property
+    def should_failover(self) -> bool:
+        return self is not ErrorKind.FATAL
+
+
+class TaskKind(StrEnum):
+    """What a request is for, so routing can prefer a suitable provider.
+
+    Derived from the calling agent rather than declared at the call site, which
+    keeps every agent free of provider knowledge.
+    """
+
+    #: Requirements, architecture, schema design — judgement-heavy.
+    REASONING = "reasoning"
+    #: Writing application source, the largest and most exacting outputs.
+    CODE_GENERATION = "code_generation"
+    #: Reviewing or improving existing source.
+    REVIEW = "review"
+    #: Prose deliverables where a cheaper model is sufficient.
+    DOCUMENTATION = "documentation"
+    #: Short structured summaries.
+    SUMMARY = "summary"
+
+
 class AdapterKind(StrEnum):
     """Categories in the plugin-based technology adapter system."""
 

@@ -103,13 +103,63 @@ class Settings(BaseSettings):
     database_max_overflow: int = 20
 
     # --- Language model --------------------------------------------------
-    # Which provider the agents talk to. Both implement `LLMProvider`, so
-    # nothing outside this layer changes when the value does.
-    llm_provider: Literal["anthropic", "gemini"] = "anthropic"
+    # The preferred provider. It is moved to the front of the routing order
+    # rather than being the only option: every other configured provider stays
+    # available as a fallback, which is what keeps a run alive when this one
+    # hits its quota.
+    llm_provider: Literal["anthropic", "gemini", "groq", "openai", "ollama"] = "anthropic"
+
+    #: Fallback order after the preferred provider, most preferred first.
+    #: Unknown names are ignored; missing ones simply never get selected.
+    llm_provider_priority: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["gemini", "groq", "ollama", "openai", "anthropic"]
+    )
+    #: Providers switched off regardless of whether they hold credentials.
+    llm_disabled_providers: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    llm_failover_enabled: bool = True
+    llm_task_routing_enabled: bool = True
+    #: How long a provider is withheld after a quota or credential rejection.
+    llm_quota_cooldown_seconds: float = 300.0
+    #: How long a provider is withheld after repeated ordinary failures.
+    llm_failure_cooldown_seconds: float = 60.0
+    #: Consecutive failures that trigger the shorter cooldown.
+    llm_failure_threshold: int = 3
+
+    llm_cache_enabled: bool = True
+    llm_cache_max_entries: int = 512
+    llm_cache_ttl_seconds: float = 3600.0
+
+    # Per-provider credentials and models.
     anthropic_api_key: str | None = None
+    llm_model: str = "claude-opus-5"
+
     google_api_key: str | None = None
     gemini_model: str = "gemini-3.6-flash"
-    llm_model: str = "claude-opus-5"
+
+    groq_api_key: str | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    # Groq's free tier bills input and output against one per-minute budget
+    # (12k TPM by default). These leave headroom under it so a request is
+    # skipped rather than rejected.
+    groq_max_prompt_tokens: int = 8000
+    groq_max_output_tokens: int = 3500
+
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_max_prompt_tokens: int = 0
+    openai_max_output_tokens: int = 0
+
+    #: Ollama runs locally and authenticates nothing, so it needs no key.
+    ollama_model: str = "llama3.1"
+    ollama_base_url: str = "http://localhost:11434/v1"
+    ollama_enabled: bool = False
+    # Local models usually run with a modest context window.
+    ollama_max_prompt_tokens: int = 6000
+    ollama_max_output_tokens: int = 4096
+
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     llm_max_tokens: int = 32000
     llm_max_retries: int = 3
@@ -147,8 +197,31 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in text.split(",") if origin.strip()]
 
     @field_validator(
+        "llm_provider_priority", "llm_disabled_providers", mode="before"
+    )
+    @classmethod
+    def _split_provider_list(cls, value: object) -> object:
+        """Accept `gemini,groq,ollama` as well as a JSON array.
+
+        Same `NoDecode` reasoning as `cors_origins`: without it the settings
+        source tries to JSON-decode a plain comma-separated list and fails
+        before any validator runs.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
+        return [item.strip().lower() for item in text.split(",") if item.strip()]
+
+    @field_validator(
         "anthropic_api_key",
         "google_api_key",
+        "groq_api_key",
+        "openai_api_key",
         "bootstrap_admin_email",
         "bootstrap_admin_password",
     )
@@ -202,21 +275,77 @@ class Settings(BaseSettings):
         return self.database_url.startswith("sqlite")
 
     @property
+    def provider_credentials(self) -> dict[str, str | None]:
+        """API key per provider. `None` means the provider needs none."""
+        return {
+            "anthropic": self.anthropic_api_key,
+            "gemini": self.google_api_key,
+            "groq": self.groq_api_key,
+            "openai": self.openai_api_key,
+            "ollama": None,
+        }
+
+    @property
+    def provider_models(self) -> dict[str, str]:
+        return {
+            "anthropic": self.llm_model,
+            "gemini": self.gemini_model,
+            "groq": self.groq_model,
+            "openai": self.openai_model,
+            "ollama": self.ollama_model,
+        }
+
+    @property
+    def resolved_provider_priority(self) -> list[str]:
+        """Routing order: preferred provider first, then the configured list.
+
+        Deduplicated, so naming the preferred provider in the list as well is
+        harmless rather than a second attempt at the same one.
+        """
+        order: list[str] = [self.llm_provider]
+        order.extend(self.llm_provider_priority)
+        seen: set[str] = set()
+        return [key for key in order if not (key in seen or seen.add(key))]
+
+    @property
+    def configured_providers(self) -> list[str]:
+        """Providers that hold the credentials they need and are switched on."""
+        disabled = {key.lower() for key in self.llm_disabled_providers}
+        credentials = self.provider_credentials
+        available: list[str] = []
+        for key in self.resolved_provider_priority:
+            if key in disabled or key not in credentials:
+                continue
+            if key == "ollama":
+                if self.ollama_enabled:
+                    available.append(key)
+                continue
+            if credentials[key]:
+                available.append(key)
+        return available
+
+    @property
     def llm_configured(self) -> bool:
-        """Whether the *selected* provider has the key it needs."""
-        if self.llm_provider == "gemini":
-            return bool(self.google_api_key)
-        return bool(self.anthropic_api_key)
+        """Whether at least one provider can serve a request."""
+        return bool(self.configured_providers)
 
     @property
     def active_model(self) -> str:
-        """The model identifier the selected provider will use."""
-        return self.gemini_model if self.llm_provider == "gemini" else self.llm_model
+        """The model the first eligible provider will use."""
+        providers = self.configured_providers
+        key = providers[0] if providers else self.llm_provider
+        return self.provider_models.get(key, self.llm_model)
 
     @property
     def active_api_key_variable(self) -> str:
-        """The environment variable a user must set for the selected provider."""
-        return "GOOGLE_API_KEY" if self.llm_provider == "gemini" else "ANTHROPIC_API_KEY"
+        """The environment variable to set for the preferred provider."""
+        return {
+            "anthropic": "ANTHROPIC_API_KEY",
+            "gemini": "GOOGLE_API_KEY",
+            "groq": "GROQ_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "ollama": "OLLAMA_ENABLED",
+        }.get(self.llm_provider, "ANTHROPIC_API_KEY")
 
 
 @lru_cache(maxsize=1)

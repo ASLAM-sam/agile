@@ -62,9 +62,11 @@ How Aegis AI is put together, and why each significant decision was made.
 │  └───────────┘  └───────────┘  └───────────┘  └───────────────┘ │
 └────────────┬──────────────────────────────────┬──────────────────┘
              │                                  │
-      ┌──────▼───────┐                  ┌───────▼────────┐
-      │  PostgreSQL  │                  │  Anthropic API │
-      └──────────────┘                  └────────────────┘
+      ┌──────▼───────┐                  ┌───────▼─────────────────┐
+      │  PostgreSQL  │                  │  ProviderManager        │
+      └──────────────┘                  │  gemini · groq · ollama │
+                                        │  openai · anthropic     │
+                                        └─────────────────────────┘
 ```
 
 ### Module layering
@@ -251,49 +253,93 @@ asserts every adapter includes that section.
 
 ## The LLM layer
 
-Agents depend on the `LLMProvider` protocol, never on a concrete client, so the
-provider can be swapped and tests can substitute a deterministic double without
-touching agent code.
+Agents depend on the `LLMProvider` protocol, never on a vendor. `ProviderManager`
+implements that same protocol, so introducing multi-provider orchestration
+changed no agent, no workflow step and no adapter — the seam already existed for
+testability, and this is what it was for.
 
-Two implementations ship:
+```
+agent.complete_structured(prompt)
+        |
+        v
+  ProviderManager          <- the only thing that talks to a vendor
+        |
+   cache -> route -> retry -> fail over -> record
+        |
+        v
+  ProviderAdapter (gemini | groq | ollama | openai | anthropic)
+```
 
-| | `llm/client.py` | `llm/gemini.py` |
+### The five stages
+
+| Stage | Module | Behaviour |
 |---|---|---|
-| Provider | Anthropic Claude | Google Gemini |
-| Selected by | `LLM_PROVIDER=anthropic` (default) | `LLM_PROVIDER=gemini` |
-| Structured output | `output_config.format` | `response_json_schema` |
-| Thinking | `effort` levels honoured | Automatic budget; `LLM_EFFORT` does not apply |
-| Caching | Stable prefix carries the cache breakpoint | Not used |
+| Cache | `llm/cache.py` | An identical prompt already answered returns immediately and costs nothing. Keyed on content, not vendor, so an answer from one provider serves a request routed to another. |
+| Route | `llm/routing.py` | The calling agent's role implies a task kind, which orders the candidates. Preference only — every provider stays reachable behind the preferred one. |
+| Retry | `llm/retry.py` | Exponential backoff with jitter against the *same* provider. Only `RETRYABLE` failures qualify. |
+| Fail over | `llm/manager.py` | A quota, rejected key or missing model moves to the next candidate and cools the failed one down. |
+| Record | `llm/health.py` | Latency, tokens, retries, failovers and cooldowns, per provider. Backs the dashboard *and* the routing decision. |
 
-`llm/factory.py` is the only module that knows which is which. Its imports are
-deferred, so running on one provider never requires the other's SDK to be
-importable.
+### Failure classification
 
-Behaviour common to both:
+The whole design turns on one question per failure: retry, fail over, or stop?
 
-| Concern | Handling |
-|---|---|
-| Structured output | Strict JSON Schema — the response is guaranteed to satisfy it |
-| Streaming | Always. Agent completions request tens of thousands of tokens; non-streaming requests at that size hit HTTP timeouts |
-| Retries | Exponential backoff with jitter on rate limits, connection errors and 5xx |
-| Truncation | A `max_tokens` finish raises rather than returning a partial file |
-| Refusals | Distinguished from failures, so they are not retried |
-| Accounting | Usage aggregated per agent, per run |
+| Kind | Meaning | Action |
+|---|---|---|
+| `RETRYABLE` | Timeout, connection error, 5xx | Retry the same provider |
+| `QUOTA` | Rate limited or out of credit | Next provider; cool this one down |
+| `AUTH` | Credentials rejected | Next provider; retrying cannot help |
+| `UNAVAILABLE` | Model or endpoint missing, or a refusal | Next provider |
+| `FATAL` | The request itself is malformed | Stop — every provider rejects it identically |
 
-Schema construction goes through `llm/schema.py` helpers, which apply
-`additionalProperties: false` and the `required` list automatically — the
-structured-outputs invariant becomes impossible to forget. Every construct they
-emit is on both providers' supported lists, so a schema needs no translation
-when the provider changes.
+Adapters tag the errors they raise and the manager reads the tag. Parsing
+messages was the alternative and is the wrong one: vendor wording changes
+without notice, and routing that silently degrades when a vendor rewrites a
+string is worse than no routing at all. Untagged errors default to `FATAL`,
+because an unknown failure repeated across five providers costs five quotas and
+still fails.
 
-### ADR: a second provider rather than an abstraction rewrite
+Classification walks the exception chain. Both first-party clients wrap their
+last transport failure in a generic error; reading only the outer exception
+turned an exhausted quota into an ordinary timeout, which earned no cooldown and
+made every remaining agent rediscover it.
 
-The `LLMProvider` protocol already existed for testability. Adding Gemini
-required a new module implementing it, a factory branch and configuration —
-no change to any agent, adapter, workflow or packaging module. Errors are
-translated at the provider boundary into the platform's own exception types, so
-a depleted balance, a rejected key and an unavailable model each produce the
-same actionable shape regardless of which provider raised them.
+### The adapters
+
+| Module | Providers | Structured output |
+|---|---|---|
+| `providers/native.py` | Anthropic, Gemini | Server-enforced JSON Schema |
+| `providers/openai_compatible.py` | Groq, OpenAI, Ollama | `json_schema` where supported, else `json_object` plus prompt-stated schema, validated locally |
+
+Groq, OpenAI and Ollama share one implementation because they share one wire
+protocol. A response that fails local validation is reported as a provider
+failure, so the manager fails over rather than handing a malformed object to an
+agent.
+
+Schema construction goes through `llm/schema.py`, which applies
+`additionalProperties: false` and the `required` list automatically. Every
+construct it emits is on every provider's supported list, so a schema needs no
+translation when the provider changes.
+
+### ADR: the manager implements the protocol it replaces
+
+`ProviderManager` could have been a new interface that agents were migrated to.
+Making it satisfy the existing `LLMProvider` protocol instead meant the entire
+agent layer was already compatible: the change was one factory returning a
+different object.
+
+The manager is a process-wide singleton, which is the point rather than an
+optimisation. Cooldowns and the cache only mean anything if they outlive a
+single run; rebuilt per request, the system would rediscover an exhausted quota
+on every agent and never serve a cache hit. It is closed once, from the
+application lifespan.
+
+### ADR: non-AI work stays non-AI
+
+Packaging, ZIP assembly, folder creation, manifests, the execution timeline,
+progress tracking and validation are ordinary Python. They are deterministic
+problems with exact answers; a model would make them slower, more expensive and
+occasionally wrong. The Artifact Manager agent issues no completion at all.
 
 ---
 

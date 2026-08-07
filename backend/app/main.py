@@ -16,6 +16,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.db.bootstrap import ensure_schema, seed_bootstrap_admin
 from app.db.session import dispose_engine
+from app.llm.factory import close_llm_provider
 from app.services.orchestration_service import get_orchestrator
 
 configure_logging()
@@ -74,6 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("application_stopping")
     await get_orchestrator().shutdown()
+    await close_llm_provider()
     await dispose_engine()
 
 

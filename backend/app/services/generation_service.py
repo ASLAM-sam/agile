@@ -101,19 +101,18 @@ class GenerationService:
             idea=project.idea,
         )
 
+        # The provider manager is process-wide and is closed at application
+        # shutdown. Closing it here would tear down the transports, cooldowns
+        # and cache that every other run depends on.
         llm: LLMProvider = self._llm_factory()
-        try:
-            ctx = AgentContext(
-                memory=memory,
-                llm=llm,
-                registry=self._adapters,
-                report_progress=_noop_progress,
-                report_log=_noop_log,
-            )
-            await BusinessAnalystAgent().execute(ctx)
-        finally:
-            if hasattr(llm, "aclose"):
-                await llm.aclose()
+        ctx = AgentContext(
+            memory=memory,
+            llm=llm,
+            registry=self._adapters,
+            report_progress=_noop_progress,
+            report_log=_noop_log,
+        )
+        await BusinessAnalystAgent().execute(ctx)
 
         logger.info(
             "analysis_complete",

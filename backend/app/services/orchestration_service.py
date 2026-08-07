@@ -245,8 +245,9 @@ class RunOrchestrator:
             await self._fail(run_id, message)
 
         finally:
-            if llm is not None and hasattr(llm, "aclose"):
-                await llm.aclose()
+            # The provider manager is process-wide and outlives this run: its
+            # cooldowns and cache are what keep the *next* run from repeating
+            # this one's quota discoveries. It is closed at app shutdown.
             await self._bus.close_topic(run_id)
 
     # --- setup helpers ---------------------------------------------------

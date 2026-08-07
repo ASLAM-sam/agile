@@ -10,6 +10,7 @@ import type {
   HealthStatus,
   Paged,
   Project,
+  ProviderDashboard,
   Run,
   RunEvent,
   TechStack,
@@ -98,4 +99,14 @@ export const catalogApi = {
 
 export const systemApi = {
   health: (signal?: AbortSignal) => api.get<HealthStatus>('/health', signal),
+};
+
+export const providerApi = {
+  dashboard: (signal?: AbortSignal) => api.get<ProviderDashboard>('/providers', signal),
+
+  routing: (signal?: AbortSignal) =>
+    api.get<Record<string, string>>('/providers/routing', signal),
+
+  reset: (key: string) =>
+    api.post<{ key: string; cleared: boolean; message: string }>(`/providers/${key}/reset`),
 };

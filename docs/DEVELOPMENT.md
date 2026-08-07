@@ -9,6 +9,7 @@ How to work on Aegis AI: setup, conventions, and how to extend it.
 - [Code conventions](#code-conventions)
 - [Testing](#testing)
 - [Adding a technology adapter](#adding-a-technology-adapter)
+- [Adding a model provider](#adding-a-model-provider)
 - [Adding an agent](#adding-an-agent)
 - [Working on prompts](#working-on-prompts)
 - [Database changes](#database-changes)
@@ -18,9 +19,8 @@ How to work on Aegis AI: setup, conventions, and how to extend it.
 
 ## Setup
 
-**Prerequisites:** Python 3.11+, Node 20+, and a key for one model provider —
-Anthropic or Google Gemini. Docker and PostgreSQL are optional for local
-development.
+**Prerequisites:** Python 3.11+, Node 20+, and a key for at least one model
+provider. Docker and PostgreSQL are optional for local development.
 
 ```bash
 git clone <repository-url> aegis
@@ -34,12 +34,19 @@ Set `SECRET_KEY` and a model provider key in `backend/.env`:
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Pick a provider with `LLM_PROVIDER`. Only that provider's key is required:
+`LLM_PROVIDER` names the provider tried first. Every other provider holding a
+key stays behind it as an automatic fallback:
 
-| `LLM_PROVIDER` | Key | Where to get one |
+| Provider | Key | Where to get one |
 |---|---|---|
 | `anthropic` (default) | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 | `gemini` | `GOOGLE_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — free tier |
+| `groq` | `GROQ_API_KEY` | [console.groq.com/keys](https://console.groq.com/keys) — free tier |
+| `openai` | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
+| `ollama` | none — set `OLLAMA_ENABLED=true` | local `ollama serve` |
+
+**Configure at least two.** A single provider has nothing to fail over to, and
+free tiers run out mid-run.
 
 Configuration lives under `backend/` because the backend is the only component
 that reads it. `app/core/config.py` resolves the path relative to the package
@@ -149,7 +156,7 @@ presentation. There is no reason to hand-roll them.
 ## Testing
 
 ```bash
-cd backend  && pytest -q                 # 219 tests
+cd backend  && pytest -q                 # 291 tests
 cd backend  && pytest --cov=app          # with coverage
 cd frontend && npm test                  # 43 tests
 ```
@@ -246,6 +253,78 @@ baseline — it simply will not be preferred for any particular domain.
 the parameter lists and it inherits every contract check: path safety, non-empty
 content, pinned dependencies, non-root Dockerfiles, and a "Do not generate"
 section.
+
+---
+
+## Adding a model provider
+
+Two cases. Both leave every agent, workflow step and adapter untouched.
+
+### It speaks the OpenAI chat-completions protocol
+
+Most do. This is configuration, not code — add a factory entry to
+`app/llm/providers/registry.py`:
+
+```python
+def _together(spec: ProviderSpec, config: Settings) -> ProviderAdapter:
+    return OpenAICompatibleAdapter(
+        spec,
+        base_url=config.together_base_url,
+        api_key=config.together_api_key,
+        timeout_seconds=config.llm_timeout_seconds,
+        supports_json_schema=False,   # falls back to json_object + validation
+    )
+
+PROVIDER_FACTORIES["together"] = _together
+PROVIDER_LABELS["together"] = ("Together AI", ("free tier",))
+```
+
+Add `together_api_key`, `together_model` and `together_base_url` to `Settings`,
+list the key in `provider_credentials` and `provider_models`, and it appears in
+the routing order, on the dashboard, and in failover.
+
+### It has its own SDK
+
+Subclass `ProviderAdapter` in `app/llm/providers/`. It owns exactly two things:
+
+```python
+class MyAdapter(ProviderAdapter):
+    @property
+    def is_configured(self) -> bool: ...
+
+    async def complete_structured(self, prompt) -> Completion: ...
+    async def complete_text(self, prompt) -> TextCompletion: ...
+
+    def classify(self, error: BaseException) -> ErrorKind:
+        """Retry, fail over, or stop."""
+```
+
+Retrying, selection, caching and health are **not** the adapter's job. They are
+cross-provider policies; implementing them per adapter is how five providers
+become five subtly different behaviours.
+
+### Classification is the part that matters
+
+`classify` decides whether a failure is retried, handed to the next provider, or
+raised. Get it wrong and the system degrades quietly:
+
+- A quota misread as `RETRYABLE` earns no cooldown, so every remaining agent
+  pays another round trip to rediscover the same empty quota.
+- A malformed request misread as `QUOTA` is retried against all five providers,
+  spending five quotas to collect five identical rejections.
+
+Walk `__cause__`, not just the outer exception — a client with its own retry
+loop wraps the real error. `tests/unit/test_provider_manager.py` has the
+regression cases.
+
+### Confirm it participates
+
+```bash
+pytest tests/unit/test_provider_manager.py -q
+```
+
+The failover, routing and cooldown tests are provider-agnostic, so a new adapter
+inherits them by being registered.
 
 ---
 

@@ -243,10 +243,13 @@ class GeminiClient:
             )
             await asyncio.sleep(delay)
 
+        # Chained deliberately: the provider manager classifies a failure by
+        # walking `__cause__`, and a 429 buried here must still be recognised
+        # as an exhausted quota rather than as a generic timeout.
         raise LLMError(
             f"Model provider unavailable after {self._max_retries + 1} attempts: {last_error}",
             details=prompt.metadata,
-        )
+        ) from last_error
 
     async def _stream_once(
         self, prompt: PromptBundle, config: genai_types.GenerateContentConfig
