@@ -107,12 +107,14 @@ class Settings(BaseSettings):
     # rather than being the only option: every other configured provider stays
     # available as a fallback, which is what keeps a run alive when this one
     # hits its quota.
-    llm_provider: Literal["anthropic", "gemini", "groq", "openai", "ollama"] = "anthropic"
+    llm_provider: Literal[
+        "anthropic", "gemini", "groq", "nvidia", "openai", "ollama"
+    ] = "anthropic"
 
     #: Fallback order after the preferred provider, most preferred first.
     #: Unknown names are ignored; missing ones simply never get selected.
     llm_provider_priority: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["gemini", "groq", "ollama", "openai", "anthropic"]
+        default_factory=lambda: ["gemini", "groq", "nvidia", "ollama", "openai", "anthropic"]
     )
     #: Providers switched off regardless of whether they hold credentials.
     llm_disabled_providers: Annotated[list[str], NoDecode] = Field(default_factory=list)
@@ -145,6 +147,26 @@ class Settings(BaseSettings):
     # skipped rather than rejected.
     groq_max_prompt_tokens: int = 8000
     groq_max_output_tokens: int = 3500
+
+    #: NVIDIA NIM — the hosted catalogue at build.nvidia.com, or a NIM
+    #: container running on your own hardware. Both speak the OpenAI
+    #: chat-completions protocol, so only the base URL differs.
+    nvidia_api_key: str | None = None
+    nvidia_model: str = "meta/llama-3.3-70b-instruct"
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    # NIM serves a heterogeneous catalogue: context windows run from 8k to
+    # beyond 128k depending on which model is configured. Assuming one number
+    # for all of them would either strand large prompts on a model that could
+    # have held them, or send them to one that cannot. 0 means "no declared
+    # limit" — set these to the configured model's real limits when known.
+    nvidia_max_prompt_tokens: int = 0
+    nvidia_max_output_tokens: int = 0
+    #: How this NIM model is asked for JSON. Support varies per model, so it is
+    #: configuration rather than an assumption: `json_schema` when the model
+    #: enforces a supplied schema, `json_object` when it only guarantees valid
+    #: JSON, `prompt` when it does neither. Every mode is validated locally, so
+    #: the weakest one is still safe — just less efficient.
+    nvidia_structured_output: Literal["json_schema", "json_object", "prompt"] = "json_object"
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
@@ -221,6 +243,7 @@ class Settings(BaseSettings):
         "anthropic_api_key",
         "google_api_key",
         "groq_api_key",
+        "nvidia_api_key",
         "openai_api_key",
         "bootstrap_admin_email",
         "bootstrap_admin_password",
@@ -281,6 +304,7 @@ class Settings(BaseSettings):
             "anthropic": self.anthropic_api_key,
             "gemini": self.google_api_key,
             "groq": self.groq_api_key,
+            "nvidia": self.nvidia_api_key,
             "openai": self.openai_api_key,
             "ollama": None,
         }
@@ -291,6 +315,7 @@ class Settings(BaseSettings):
             "anthropic": self.llm_model,
             "gemini": self.gemini_model,
             "groq": self.groq_model,
+            "nvidia": self.nvidia_model,
             "openai": self.openai_model,
             "ollama": self.ollama_model,
         }
@@ -343,6 +368,7 @@ class Settings(BaseSettings):
             "anthropic": "ANTHROPIC_API_KEY",
             "gemini": "GOOGLE_API_KEY",
             "groq": "GROQ_API_KEY",
+            "nvidia": "NVIDIA_API_KEY",
             "openai": "OPENAI_API_KEY",
             "ollama": "OLLAMA_ENABLED",
         }.get(self.llm_provider, "ANTHROPIC_API_KEY")

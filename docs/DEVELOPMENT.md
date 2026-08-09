@@ -42,6 +42,7 @@ key stays behind it as an automatic fallback:
 | `anthropic` (default) | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 | `gemini` | `GOOGLE_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — free tier |
 | `groq` | `GROQ_API_KEY` | [console.groq.com/keys](https://console.groq.com/keys) — free tier |
+| `nvidia` | `NVIDIA_API_KEY` | [build.nvidia.com](https://build.nvidia.com) — free credits |
 | `openai` | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
 | `ollama` | none — set `OLLAMA_ENABLED=true` | local `ollama serve` |
 
@@ -156,7 +157,7 @@ presentation. There is no reason to hand-roll them.
 ## Testing
 
 ```bash
-cd backend  && pytest -q                 # 291 tests
+cd backend  && pytest -q                 # 351 tests
 cd backend  && pytest --cov=app          # with coverage
 cd frontend && npm test                  # 43 tests
 ```
@@ -282,6 +283,10 @@ PROVIDER_LABELS["together"] = ("Together AI", ("free tier",))
 Add `together_api_key`, `together_model` and `together_base_url` to `Settings`,
 list the key in `provider_credentials` and `provider_models`, and it appears in
 the routing order, on the dashboard, and in failover.
+
+NVIDIA NIM is the worked example: `_nvidia` in the registry, a settings block,
+three map entries. No new client, no change to the manager, nothing above the
+LLM layer. See `tests/unit/test_nvidia_provider.py`.
 
 ### It has its own SDK
 

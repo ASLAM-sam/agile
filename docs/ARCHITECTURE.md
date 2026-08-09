@@ -64,8 +64,9 @@ How Aegis AI is put together, and why each significant decision was made.
              │                                  │
       ┌──────▼───────┐                  ┌───────▼─────────────────┐
       │  PostgreSQL  │                  │  ProviderManager        │
-      └──────────────┘                  │  gemini · groq · ollama │
-                                        │  openai · anthropic     │
+      └──────────────┘                  │  gemini · groq · nvidia │
+                                        │  ollama · openai        │
+                                        │  anthropic              │
                                         └─────────────────────────┘
 ```
 
@@ -267,7 +268,7 @@ agent.complete_structured(prompt)
    cache -> route -> retry -> fail over -> record
         |
         v
-  ProviderAdapter (gemini | groq | ollama | openai | anthropic)
+  ProviderAdapter (gemini | groq | nvidia | ollama | openai | anthropic)
 ```
 
 ### The five stages
@@ -309,12 +310,20 @@ made every remaining agent rediscover it.
 | Module | Providers | Structured output |
 |---|---|---|
 | `providers/native.py` | Anthropic, Gemini | Server-enforced JSON Schema |
-| `providers/openai_compatible.py` | Groq, OpenAI, Ollama | `json_schema` where supported, else `json_object` plus prompt-stated schema, validated locally |
+| `providers/openai_compatible.py` | Groq, NVIDIA NIM, OpenAI, Ollama | `json_schema` where supported, else `json_object` plus prompt-stated schema, validated locally |
 
-Groq, OpenAI and Ollama share one implementation because they share one wire
-protocol. A response that fails local validation is reported as a provider
+Groq, NVIDIA, OpenAI and Ollama share one implementation because they share one
+wire protocol. A response that fails local validation is reported as a provider
 failure, so the manager fails over rather than handing a malformed object to an
 agent.
+
+That reuse is what makes adding a vendor a configuration change. NVIDIA NIM was
+added as a registry entry and a block of settings: no new client, no change to
+the manager, and nothing above the LLM layer. Its one variation — how reliably a
+given NIM model honours `response_format` — is read from
+`NVIDIA_STRUCTURED_OUTPUT` rather than assumed, because the catalogue is
+heterogeneous and the weakest mode (schema in the prompt, validated locally) is
+correct for every model in it.
 
 Schema construction goes through `llm/schema.py`, which applies
 `additionalProperties: false` and the `required` list automatically. Every

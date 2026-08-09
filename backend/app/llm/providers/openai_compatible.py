@@ -290,6 +290,12 @@ def _message_from(response: httpx.Response) -> str:
             return error.strip()
         if isinstance(payload.get("message"), str):
             return payload["message"].strip()
+        # NVIDIA NIM answers with a problem-details envelope
+        # ({"status": 401, "title": "Unauthorized", "detail": "..."}) rather
+        # than OpenAI's {"error": {...}}. Without this the reason reaching the
+        # dashboard would be the repr of a dict.
+        if isinstance(payload.get("detail"), str):
+            return payload["detail"].strip()
     return str(payload)[:300]
 
 

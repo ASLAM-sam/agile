@@ -35,12 +35,17 @@ AGENT_TASK_KINDS: dict[AgentRole, TaskKind] = {
 #: Provider keys preferred for each task kind, strongest-first. These are
 #: *preferences*, not restrictions: anything not named still follows behind in
 #: configured priority order, so a preference can never strand a request.
+#:
+#: NVIDIA NIM sits ahead of Groq on the demanding tasks and behind it on the
+#: cheap ones: its catalogue runs large-context open models that hold a full
+#: code-review prompt, which the smaller free tiers reject outright, but prose
+#: is not worth spending it on. No existing provider moved relative to another.
 DEFAULT_TASK_PREFERENCES: dict[TaskKind, tuple[str, ...]] = {
-    TaskKind.REASONING: ("gemini", "anthropic", "openai", "groq", "ollama"),
-    TaskKind.CODE_GENERATION: ("gemini", "anthropic", "openai", "groq", "ollama"),
-    TaskKind.REVIEW: ("gemini", "anthropic", "openai", "groq", "ollama"),
-    TaskKind.DOCUMENTATION: ("groq", "gemini", "ollama", "openai", "anthropic"),
-    TaskKind.SUMMARY: ("groq", "gemini", "ollama", "openai", "anthropic"),
+    TaskKind.REASONING: ("gemini", "anthropic", "openai", "nvidia", "groq", "ollama"),
+    TaskKind.CODE_GENERATION: ("gemini", "anthropic", "openai", "nvidia", "groq", "ollama"),
+    TaskKind.REVIEW: ("gemini", "anthropic", "openai", "nvidia", "groq", "ollama"),
+    TaskKind.DOCUMENTATION: ("groq", "gemini", "nvidia", "ollama", "openai", "anthropic"),
+    TaskKind.SUMMARY: ("groq", "gemini", "nvidia", "ollama", "openai", "anthropic"),
 }
 
 

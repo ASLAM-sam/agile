@@ -313,7 +313,7 @@ aegis/
 │   │   ├── workflow/          Memory, planner, engine, events
 │   │   └── main.py
 │   ├── alembic/               Migrations
-│   ├── tests/                 291 tests
+│   ├── tests/                 351 tests
 │   ├── .env.example           Annotated configuration → copy to backend/.env
 │   └── pyproject.toml
 ├── frontend/
@@ -355,7 +355,7 @@ sees a single origin and CORS never enters the local development loop.
 ## Testing
 
 ```bash
-cd backend && pytest -q                    # 291 tests
+cd backend && pytest -q                    # 351 tests
 cd backend && pytest --cov=app             # with coverage
 cd frontend && npm test                    # 43 tests
 ```
@@ -378,9 +378,10 @@ essentials:
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `LLM_PROVIDER` | Preferred provider: `anthropic`, `gemini`, `groq`, `openai` or `ollama`. Others remain as fallbacks. | `anthropic` |
-| `LLM_PROVIDER_PRIORITY` | Fallback order after the preferred one. | `gemini,groq,ollama,openai,anthropic` |
+| `LLM_PROVIDER` | Preferred provider: `anthropic`, `gemini`, `groq`, `nvidia`, `openai` or `ollama`. Others remain as fallbacks. | `anthropic` |
+| `LLM_PROVIDER_PRIORITY` | Fallback order after the preferred one. | `gemini,groq,nvidia,ollama,openai,anthropic` |
 | `GROQ_API_KEY` | Enables Groq. Free tier at [console.groq.com](https://console.groq.com/keys). | — |
+| `NVIDIA_API_KEY` | Enables NVIDIA NIM. Keys from [build.nvidia.com](https://build.nvidia.com). | — |
 | `LLM_FAILOVER_ENABLED` | Move to the next provider on quota, auth or outage. | `true` |
 | `LLM_CACHE_ENABLED` | Serve identical prompts from memory. | `true` |
 | `ANTHROPIC_API_KEY` | Required when the provider is `anthropic`. | — |
@@ -395,13 +396,14 @@ the rest of the platform still runs so the interface stays browsable.
 
 ### Providers and failover
 
-Five providers are supported. `LLM_PROVIDER` names the one tried first; every
+Six providers are supported. `LLM_PROVIDER` names the one tried first; every
 other provider holding credentials stays behind it as an automatic fallback.
 
 | Provider | Cost | Notes |
 |---|---|---|
 | Gemini | Free tier | Server-enforced JSON Schema. Free tier caps requests per day. |
 | Groq | Free tier | Fast. Good fallback for documentation and summaries. |
+| NVIDIA NIM | Free credits | Large-context open models. Set `NVIDIA_MODEL` from the [catalogue](https://build.nvidia.com); works against a self-hosted NIM container too. |
 | Ollama | Free, local | Needs `ollama serve`; set `OLLAMA_ENABLED=true`. |
 | OpenAI | Paid | Server-enforced JSON Schema. |
 | Anthropic | Paid | Server-enforced JSON Schema, prompt caching. |

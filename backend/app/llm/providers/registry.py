@@ -23,6 +23,7 @@ from app.llm.providers.openai_compatible import OpenAICompatibleAdapter
 PROVIDER_LABELS: dict[str, tuple[str, tuple[str, ...]]] = {
     "gemini": ("Google Gemini", ("free tier", "structured output")),
     "groq": ("Groq", ("fast", "free tier")),
+    "nvidia": ("NVIDIA NIM", ("large context", "open models")),
     "ollama": ("Ollama", ("local", "offline")),
     "openai": ("OpenAI", ("premium",)),
     "anthropic": ("Anthropic Claude", ("premium", "structured output")),
@@ -49,6 +50,25 @@ def _groq(spec: ProviderSpec, config: Settings) -> ProviderAdapter:
         # some models, so the portable option is the one that always works.
         supports_json_schema=False,
         supports_json_object=True,
+    )
+
+
+def _nvidia(spec: ProviderSpec, config: Settings) -> ProviderAdapter:
+    """NVIDIA NIM — hosted at build.nvidia.com or self-hosted.
+
+    NIM exposes the OpenAI chat-completions contract, so it needs no client of
+    its own: this is the same adapter Groq and OpenAI use, pointed at a
+    different base URL. Structured-output support varies across the NIM
+    catalogue, so it is read from configuration instead of being assumed.
+    """
+    mode = config.nvidia_structured_output
+    return OpenAICompatibleAdapter(
+        spec,
+        base_url=config.nvidia_base_url,
+        api_key=config.nvidia_api_key,
+        timeout_seconds=config.llm_timeout_seconds,
+        supports_json_schema=mode == "json_schema",
+        supports_json_object=mode in ("json_schema", "json_object"),
     )
 
 
@@ -79,6 +99,7 @@ PROVIDER_FACTORIES: dict[str, ProviderFactory] = {
     "anthropic": _anthropic,
     "gemini": _gemini,
     "groq": _groq,
+    "nvidia": _nvidia,
     "openai": _openai,
     "ollama": _ollama,
 }
