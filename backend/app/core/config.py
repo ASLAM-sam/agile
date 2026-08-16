@@ -255,6 +255,19 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("debug", mode="before")
+    @classmethod
+    def _parse_debug(cls, value: object) -> object:
+        """Accept common mode names from ambient shell variables."""
+        if not isinstance(value, str):
+            return value
+        normalised = value.strip().lower()
+        if normalised in {"debug", "development", "dev"}:
+            return True
+        if normalised in {"release", "production", "prod"}:
+            return False
+        return value
+
     @field_validator("database_url")
     @classmethod
     def _normalise_database_url(cls, value: str) -> str:
