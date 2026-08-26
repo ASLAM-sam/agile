@@ -35,6 +35,36 @@ def validate(data: Any, schema: dict[str, Any], *, path: str = "$") -> list[str]
     return problems
 
 
+def normalize_unknown_fields(data: Any, schema: dict[str, Any]) -> Any:
+    """Remove unknown keys from objects whose schema explicitly forbids them.
+
+    Some OpenAI-compatible providers guarantee JSON but do not reliably honour
+    ``additionalProperties: false``.  This is intentionally a narrow boundary
+    transformation: known values are recursively preserved, required fields
+    and their types are still checked by :func:`validate`, and objects that do
+    not forbid additional properties are left unchanged.
+    """
+    expected = schema.get("type")
+
+    if expected == "object" and isinstance(data, dict):
+        properties = schema.get("properties", {})
+        normalized: dict[str, Any] = {}
+        for name, value in data.items():
+            subschema = properties.get(name)
+            if isinstance(subschema, dict):
+                normalized[name] = normalize_unknown_fields(value, subschema)
+            elif schema.get("additionalProperties") is not False:
+                normalized[name] = value
+        return normalized
+
+    if expected == "array" and isinstance(data, list):
+        items = schema.get("items")
+        if isinstance(items, dict):
+            return [normalize_unknown_fields(value, items) for value in data]
+
+    return data
+
+
 def _validate_into(data: Any, schema: dict[str, Any], path: str, out: list[str]) -> None:
     expected = schema.get("type")
 

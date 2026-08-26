@@ -157,7 +157,7 @@ presentation. There is no reason to hand-roll them.
 ## Testing
 
 ```bash
-cd backend  && pytest -q                 # 351 tests
+cd backend  && pytest -q                 # 406 tests
 cd backend  && pytest --cov=app          # with coverage
 cd frontend && npm test                  # 43 tests
 ```

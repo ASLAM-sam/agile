@@ -15,7 +15,8 @@ export default defineConfig({
       // Same-origin in development, so CORS never enters the local loop and
       // the SSE stream is not buffered by an intermediary.
       '/api': {
-        target: 'http://localhost:8000',
+        // target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
     },

@@ -164,6 +164,22 @@ class TestSecretKey:
         assert build(SECRET_KEY=explicit).secret_key == explicit
 
 
+class TestDebugParsing:
+    """Ambient `DEBUG` values from other toolchains should not break startup."""
+
+    @pytest.mark.parametrize("value", ["debug", "development", "dev"])
+    def test_mode_names_that_mean_debug_enabled(
+        self, build: SettingsBuilder, value: str
+    ) -> None:
+        assert build(DEBUG=value).debug is True
+
+    @pytest.mark.parametrize("value", ["release", "production", "prod"])
+    def test_mode_names_that_mean_debug_disabled(
+        self, build: SettingsBuilder, value: str
+    ) -> None:
+        assert build(DEBUG=value).debug is False
+
+
 class TestBlankOptionalsBecomeNone:
     """`.env.example` leaves optional keys empty; empty is not a value."""
 

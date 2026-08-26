@@ -29,6 +29,7 @@ from app.models.user import User
 from app.repositories.run_repository import RunRepository
 from app.services.recommendation_service import RecommendationService, validate_stack
 from app.workflow.engine import preflight_skips
+from app.workflow.intent import IntentGuard, rejection_message
 from app.workflow.memory import RequirementAnalysis, SharedProjectMemory, TechStack
 from app.workflow.planner import build_plan
 
@@ -86,7 +87,21 @@ class GenerationService:
 
     async def _run_analysis(self, project: Project) -> RequirementAnalysis:
         """Execute the Business Analyst agent for its capability decisions."""
-        if not settings.llm_configured:
+        # The provider manager is process-wide and is closed at application
+        # shutdown. Closing it here would tear down the transports, cooldowns
+        # and cache that every other run depends on.
+        configured = settings.llm_configured
+        llm: LLMProvider | None = self._llm_factory() if configured else None
+
+        # Before anything is constructed, and before the credential check: the
+        # Business Analyst's schema has no shape for "this is not a project",
+        # so a greeting reaching it comes back as an invented one and eleven
+        # agents build it. Screening needs no provider, so an install with no
+        # key still answers "that is not a brief" rather than "no key set" —
+        # which is the more useful of the two errors.
+        await self._guard_intent(project, llm)
+
+        if llm is None:
             raise ConfigurationError(
                 f"{settings.active_api_key_variable} is not configured, so requirements "
                 f"cannot be analysed. Set it in backend/.env for the selected provider "
@@ -100,11 +115,6 @@ class GenerationService:
             project_slug=project.slug,
             idea=project.idea,
         )
-
-        # The provider manager is process-wide and is closed at application
-        # shutdown. Closing it here would tear down the transports, cooldowns
-        # and cache that every other run depends on.
-        llm: LLMProvider = self._llm_factory()
         ctx = AgentContext(
             memory=memory,
             llm=llm,
@@ -124,6 +134,30 @@ class GenerationService:
             },
         )
         return memory.analysis
+
+    async def _guard_intent(self, project: Project, llm: LLMProvider | None) -> None:
+        """Refuse anything that is not a software brief.
+
+        Raised as a `ValidationError` rather than returning an empty analysis:
+        the submission was rejected, not analysed, and 422 with an explanation
+        is what the interface already knows how to display.
+        """
+        if not settings.intent_check_enabled:
+            return
+
+        verdict = await IntentGuard(llm).check(project.idea)
+        if verdict.is_build_request:
+            return
+
+        logger.info(
+            "intent_rejected",
+            extra={
+                "project_id": project.id,
+                "decided_by": verdict.decided_by,
+                "reason": verdict.reason,
+            },
+        )
+        raise ValidationError(rejection_message(project.idea, verdict.reason))
 
     def _workflow_preview(self, analysis: RequirementAnalysis) -> list[dict[str, Any]]:
         """The plan the user will see before committing to a run."""
