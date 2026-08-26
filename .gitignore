@@ -52,3 +52,5 @@ Thumbs.db
 # --- Logs ---
 *.log
 logs/
+
+backend/.venv312/
