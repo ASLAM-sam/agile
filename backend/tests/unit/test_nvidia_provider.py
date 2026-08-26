@@ -75,7 +75,8 @@ def respond(adapter: OpenAICompatibleAdapter, handler: Any) -> list[httpx.Reques
 def completion(content: str = '{"name": "Aegis"}', **overrides: Any) -> httpx.Response:
     """A well-formed NIM chat-completions reply."""
     payload: dict[str, Any] = {
-        "model": "meta/llama-3.3-70b-instruct",
+        # "model": "nvidia/nemotron-3-ultra-550b-a55b",
+          "model": "nvidia/nemotron-3-ultra-550b-a55b",
         "choices": [
             {"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
         ],
@@ -270,7 +271,7 @@ class TestResponseParsing:
         assert result.text == "hello from nim"
         assert result.usage.input_tokens == 1200
         assert result.usage.output_tokens == 300
-        assert result.model == "meta/llama-3.3-70b-instruct"
+        assert result.model == "nvidia/nemotron-3-ultra-550b-a55b"
 
     async def test_structured_output_is_parsed_and_validated(self) -> None:
         adapter = nvidia_adapter()

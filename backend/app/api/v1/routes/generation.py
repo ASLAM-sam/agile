@@ -225,18 +225,18 @@ async def stream_run(
             for event in history:
                 highest = max(highest, event.sequence)
                 yield _sse(
-                    event.event_type.value,
+                    event.event_type,
                     {
                         "sequence": event.sequence,
                         "run_id": run_id,
-                        "type": event.event_type.value,
-                        "level": event.level.value,
+                        "type": event.event_type,
+                        "level": event.level,
                         "agent": event.agent_role,
                         "message": event.message,
                         "payload": event.payload or {},
                         "timestamp": event.created_at.isoformat(),
-                    },
-                )
+                },
+)
 
             # 2. A finished run has no more live events to wait for.
             if terminal:

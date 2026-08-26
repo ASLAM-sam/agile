@@ -107,26 +107,44 @@ class Settings(BaseSettings):
     # rather than being the only option: every other configured provider stays
     # available as a fallback, which is what keeps a run alive when this one
     # hits its quota.
+    # llm_provider: Literal[
+    #     "anthropic", "gemini", "groq", "nvidia", "openai", "ollama"
+    # ] = "anthropic"
     llm_provider: Literal[
-        "anthropic", "gemini", "groq", "nvidia", "openai", "ollama"
-    ] = "anthropic"
+    "anthropic", "gemini", "groq", "nvidia", "openai", "ollama"
+] = "gemini"
 
     #: Fallback order after the preferred provider, most preferred first.
     #: Unknown names are ignored; missing ones simply never get selected.
+    # llm_provider_priority: Annotated[list[str], NoDecode] = Field(
+    #     default_factory=lambda: ["gemini", "groq", "nvidia", "ollama", "openai", "anthropic"]
+    # )
     llm_provider_priority: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["gemini", "groq", "nvidia", "ollama", "openai", "anthropic"]
-    )
+    default_factory=lambda: [
+        "nvidia",
+        "groq",
+        "openai",
+        "anthropic",
+        "ollama",
+    ]
+)
     #: Providers switched off regardless of whether they hold credentials.
     llm_disabled_providers: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     llm_failover_enabled: bool = True
-    llm_task_routing_enabled: bool = True
+    # llm_task_routing_enabled: bool = True
+    llm_task_routing_enabled: bool = False
     #: How long a provider is withheld after a quota or credential rejection.
     llm_quota_cooldown_seconds: float = 300.0
     #: How long a provider is withheld after repeated ordinary failures.
     llm_failure_cooldown_seconds: float = 60.0
     #: Consecutive failures that trigger the shorter cooldown.
     llm_failure_threshold: int = 3
+
+    # Refuse submissions that are not software briefs before any agent runs.
+    # A greeting reaching the Business Analyst comes back as an invented
+    # project, because its schema has no shape for "this is not one".
+    intent_check_enabled: bool = True
 
     llm_cache_enabled: bool = True
     llm_cache_max_entries: int = 512
@@ -152,7 +170,7 @@ class Settings(BaseSettings):
     #: container running on your own hardware. Both speak the OpenAI
     #: chat-completions protocol, so only the base URL differs.
     nvidia_api_key: str | None = None
-    nvidia_model: str = "meta/llama-3.3-70b-instruct"
+    nvidia_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     # NIM serves a heterogeneous catalogue: context windows run from 8k to
     # beyond 128k depending on which model is configured. Assuming one number

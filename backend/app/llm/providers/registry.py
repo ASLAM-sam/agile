@@ -22,11 +22,11 @@ from app.llm.providers.openai_compatible import OpenAICompatibleAdapter
 #: Human-facing names and notes for the dashboard.
 PROVIDER_LABELS: dict[str, tuple[str, tuple[str, ...]]] = {
     "gemini": ("Google Gemini", ("free tier", "structured output")),
-    "groq": ("Groq", ("fast", "free tier")),
     "nvidia": ("NVIDIA NIM", ("large context", "open models")),
-    "ollama": ("Ollama", ("local", "offline")),
-    "openai": ("OpenAI", ("premium",)),
+    "groq": ("Groq", ("fast", "free tier")),
     "anthropic": ("Anthropic Claude", ("premium", "structured output")),
+    "openai": ("OpenAI", ("premium",)),
+    "ollama": ("Ollama", ("local", "offline")),
 }
 
 ProviderFactory = Callable[[ProviderSpec, Settings], ProviderAdapter]

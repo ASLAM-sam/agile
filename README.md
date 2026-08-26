@@ -313,7 +313,7 @@ aegis/
 │   │   ├── workflow/          Memory, planner, engine, events
 │   │   └── main.py
 │   ├── alembic/               Migrations
-│   ├── tests/                 351 tests
+│   ├── tests/                 406 tests
 │   ├── .env.example           Annotated configuration → copy to backend/.env
 │   └── pyproject.toml
 ├── frontend/
@@ -355,7 +355,7 @@ sees a single origin and CORS never enters the local development loop.
 ## Testing
 
 ```bash
-cd backend && pytest -q                    # 351 tests
+cd backend && pytest -q                    # 406 tests
 cd backend && pytest --cov=app             # with coverage
 cd frontend && npm test                    # 43 tests
 ```
