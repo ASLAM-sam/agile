@@ -21,9 +21,12 @@ import pytest
 
 from app.core.config import Settings
 from app.core.enums import ErrorKind, TaskKind
-from app.llm.providers.base import ProviderAdapter
+from app.llm.cache import PromptCache
+from app.llm.manager import ProviderManager
+from app.llm.providers.base import ProviderAdapter, ProviderSpec
 from app.llm.providers.openai_compatible import OpenAICompatibleAdapter
 from app.llm.providers.registry import PROVIDER_FACTORIES, PROVIDER_LABELS, build_providers
+from app.llm.retry import RetryManager, RetryPolicy
 from app.llm.routing import DEFAULT_TASK_PREFERENCES, RoutingTable
 from app.llm.schema import obj, string
 from app.llm.types import PromptBundle
@@ -294,6 +297,92 @@ class TestResponseParsing:
         )
 
         assert result.data == {"name": "Aegis"}
+
+    async def test_harmless_unknown_properties_are_removed_before_validation(self) -> None:
+        adapter = nvidia_adapter()
+        respond(adapter, completion(content='{"name": "Aegis", "overview2": "extra"}'))
+
+        result = await adapter.complete_structured(
+            PromptBundle(cacheable_system="s", user_message="u", schema=SCHEMA)
+        )
+
+        assert result.data == {"name": "Aegis"}
+
+    async def test_nested_unknown_properties_are_removed_before_validation(self) -> None:
+        schema = obj({"project": obj({"name": string("Project name.")})})
+        adapter = nvidia_adapter()
+        respond(
+            adapter,
+            completion(
+                content=(
+                    '{"project": {"name": "Aegis", "provider_note": "extra"}, '
+                    '"overview2": "extra"}'
+                )
+            ),
+        )
+
+        result = await adapter.complete_structured(
+            PromptBundle(cacheable_system="s", user_message="u", schema=schema)
+        )
+
+        assert result.data == {"project": {"name": "Aegis"}}
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            '{"name": 123}',
+            '{"unrelated": 1}',
+            '{"name":',
+        ],
+    )
+    async def test_invalid_structured_output_still_fails_over(self, content: str) -> None:
+        adapter = nvidia_adapter()
+        respond(adapter, completion(content=content))
+
+        with pytest.raises(Exception) as exc:
+            await adapter.complete_structured(
+                PromptBundle(cacheable_system="s", user_message="u", schema=SCHEMA)
+            )
+
+        assert adapter.classify(exc.value) is ErrorKind.UNAVAILABLE
+
+    async def test_nvidia_success_after_gemini_failure_does_not_call_groq(self) -> None:
+        gemini = OpenAICompatibleAdapter(
+            ProviderSpec("gemini", "Google Gemini", "test-model", priority=0),
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            api_key="gemini-test-key",
+            timeout_seconds=1,
+        )
+        gemini_requests = respond(
+            gemini, httpx.Response(429, json={"error": {"message": "quota exceeded"}})
+        )
+        nvidia = nvidia_adapter()
+        respond(nvidia, completion(content='{"name": "Aegis", "overview2": "extra"}'))
+        groq = OpenAICompatibleAdapter(
+            ProviderSpec("groq", "Groq", "test-model", priority=1),
+            base_url="https://api.groq.com/openai/v1",
+            api_key="gsk-test-key",
+            timeout_seconds=1,
+        )
+        groq_requests = respond(groq, lambda _: pytest.fail("Groq must not be called"))
+        config = build_settings(llm_cache_enabled=False, llm_task_routing_enabled=False)
+        manager = ProviderManager(
+            providers=[gemini, nvidia, groq],
+            config=config,
+            cache=PromptCache(enabled=False),
+            retry=RetryManager(RetryPolicy(max_retries=0)),
+            routing=RoutingTable(
+                priority=("gemini", "nvidia", "groq"), task_routing_enabled=False
+            ),
+        )
+
+        result = await manager.complete_structured(
+            PromptBundle(cacheable_system="s", user_message="u", schema=SCHEMA)
+        )
+
+        assert result.data == {"name": "Aegis"}
+        assert len(gemini_requests) == 1
+        assert groq_requests == []
 
     async def test_output_that_ignores_the_schema_is_a_failover_not_a_result(self) -> None:
         adapter = nvidia_adapter()

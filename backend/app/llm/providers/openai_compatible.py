@@ -36,7 +36,7 @@ from app.core.logging import get_logger
 from app.llm.errors import tag
 from app.llm.providers.base import ProviderAdapter, ProviderSpec
 from app.llm.types import Completion, PromptBundle, TextCompletion, TokenUsage
-from app.llm.validation import describe_schema, validate
+from app.llm.validation import describe_schema, normalize_unknown_fields, validate
 
 logger = get_logger(__name__)
 
@@ -120,6 +120,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 ErrorKind.UNAVAILABLE,
             )
 
+        # OpenAI-compatible providers can return valid JSON with harmless
+        # extras even when asked for a strict schema.  Normalize only those
+        # extras at this provider boundary; the unchanged application schema
+        # still decides whether the resulting payload is usable.
+        payload = normalize_unknown_fields(payload, prompt.schema)
         problems = validate(payload, prompt.schema)
         if problems:
             raise tag(
