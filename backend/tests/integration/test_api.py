@@ -21,8 +21,8 @@ class TestHealthAndCatalogue:
         body = response.json()
         assert len(body["frontend"]) == 3
         assert len(body["backend"]) == 3
-        assert len(body["database"]) == 3
-        assert len(body["agents"]) == 11
+        assert [option["key"] for option in body["database"]] == ["mongodb", "sqlite"]
+        assert len(body["agents"]) == 12
 
     async def test_root_advertises_the_api(self, client: AsyncClient) -> None:
         response = await client.get("/")

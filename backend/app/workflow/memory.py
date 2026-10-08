@@ -6,8 +6,12 @@ the Backend Engineer sees the schema the Database Engineer designed, the QA
 Engineer sees the code the others wrote, and the Documentation Engineer sees
 everything.
 
-Version 1 deliberately uses no vector store. The state is small, structured and
-fully enumerable, so exact recall beats similarity search.
+Version 2 extends the original with:
+  - validation_runs: history of validation command executions
+  - repair_cycles: how many repair loops have been attempted
+  - repair_history: which errors were repaired and by whom
+  - final_qa_result: result of the post-improvement final QA pass
+  - release_eligible: whether the Artifact Manager may produce a ZIP
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from app.core.enums import AgentRole, ProjectComplexity
+from app.core.enums import AgentRole, AgentStatus, ProjectComplexity
 from app.packaging.workspace import ProjectWorkspace
 
 
@@ -172,8 +176,11 @@ class DatabaseDesign:
     tables: list[dict[str, Any]] = field(default_factory=list)
     relationships: list[dict[str, Any]] = field(default_factory=list)
     indexes: list[dict[str, Any]] = field(default_factory=list)
+    collections: list[dict[str, Any]] = field(default_factory=list)
     schema_sql: str = ""
     seed_sql: str = ""
+    schema_script: str = ""
+    seed_script: str = ""
     migrations: list[dict[str, str]] = field(default_factory=list)
     notes: str = ""
 
@@ -184,7 +191,8 @@ class DatabaseDesign:
             "tables": self.tables,
             "relationships": self.relationships,
             "indexes": self.indexes,
-            "has_schema": bool(self.schema_sql),
+            "collections": self.collections,
+            "has_schema": bool(self.schema_sql or self.schema_script),
             "migration_count": len(self.migrations),
             "notes": self.notes,
         }
@@ -217,6 +225,60 @@ class ReviewFindings:
         }
 
 
+@dataclass(slots=True)
+class ValidationResult:
+    """Result of a real execution validation run."""
+
+    passed: bool = False
+    stack: str = "unknown"
+    total_commands: int = 0
+    failed_commands: int = 0
+    failures: list[dict[str, Any]] = field(default_factory=list)
+    timestamp: str = ""
+    workspace_fingerprint: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "stack": self.stack,
+            "total_commands": self.total_commands,
+            "failed_commands": self.failed_commands,
+            "failures": self.failures,
+            "timestamp": self.timestamp,
+            "workspace_fingerprint": self.workspace_fingerprint,
+        }
+
+
+@dataclass(slots=True)
+class RepairCycle:
+    """One iteration of the error repair loop."""
+
+    cycle_number: int = 0
+    failures_found: int = 0
+    agents_involved: list[str] = field(default_factory=list)
+    files_modified: list[str] = field(default_factory=list)
+    validation_passed_after: bool = False
+    timestamp: str = ""
+    model: str = ""
+    failure_signature_before: str = ""
+    failure_signature_after: str = ""
+    result: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "cycle_number": self.cycle_number,
+            "failures_found": self.failures_found,
+            "agents_involved": self.agents_involved,
+            "files_modified": self.files_modified,
+            "validation_passed_after": self.validation_passed_after,
+            "timestamp": self.timestamp,
+            "model": self.model,
+            "failure_signature_before": self.failure_signature_before,
+            "failure_signature_after": self.failure_signature_after,
+            "result": self.result,
+        }
+
+
 @dataclass
 class SharedProjectMemory:
     """The single state object shared by every agent in a run."""
@@ -239,15 +301,48 @@ class SharedProjectMemory:
     documentation_index: list[str] = field(default_factory=list)
     confidence: dict[str, float] = field(default_factory=dict)
     agent_summaries: dict[str, str] = field(default_factory=dict)
+    agent_statuses: dict[str, str] = field(default_factory=dict)
+    agent_errors: dict[str, str] = field(default_factory=dict)
     improvements_applied: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
+    # --- Validation + repair tracking (Phase 2 extensions) ---------------
+    validation_runs: list[ValidationResult] = field(default_factory=list)
+    repair_cycles: list[RepairCycle] = field(default_factory=list)
+    final_qa_result: ValidationResult | None = None
+    release_eligible: bool = False  # Set to True only after final QA passes
+
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    # --- canonical user prompt access ------------------------------------
+
+    @property
+    def user_prompt(self) -> str:
+        """Alias for `idea` representing the user's original project request."""
+        return self.idea
+
+    @user_prompt.setter
+    def user_prompt(self, value: str) -> None:
+        self.idea = value
 
     # --- mutation --------------------------------------------------------
 
     def record_summary(self, role: AgentRole, summary: str) -> None:
         self.agent_summaries[role.value] = summary
+
+    def record_agent_status(
+        self, role: AgentRole | str, status: AgentStatus | str, error: str = ""
+    ) -> None:
+        """Track agent execution outcome for workflow validation and release gating."""
+        role_str = role.value if isinstance(role, AgentRole) else str(role)
+        status_str = status.value if isinstance(status, AgentStatus) else str(status)
+        self.agent_statuses[role_str] = status_str
+        if error:
+            self.agent_errors[role_str] = error
+
+    def get_agent_status(self, role: AgentRole | str) -> str | None:
+        role_str = role.value if isinstance(role, AgentRole) else str(role)
+        return self.agent_statuses.get(role_str)
 
     def record_confidence(self, dimension: str, score: float) -> None:
         """Store a 0–1 confidence score, clamped to range."""
@@ -256,6 +351,47 @@ class SharedProjectMemory:
     def add_note(self, note: str) -> None:
         if note and note not in self.notes:
             self.notes.append(note)
+
+    def record_validation_run(self, result: ValidationResult) -> None:
+        """Store a validation run result. Order matters — last is most recent."""
+        self.validation_runs.append(result)
+
+    def record_repair_cycle(self, cycle: RepairCycle) -> None:
+        """Store one repair cycle outcome."""
+        self.repair_cycles.append(cycle)
+
+    @property
+    def is_validation_current(self) -> bool:
+        """True if the latest validation matches the current workspace fingerprint."""
+        if not self.validation_runs:
+            return False
+        current_fp = self.workspace.fingerprint
+        last = self.validation_runs[-1]
+        return bool(last.workspace_fingerprint and last.workspace_fingerprint == current_fp)
+
+    def record_final_qa(self, result: ValidationResult) -> None:
+        """Record the final QA result and update release eligibility."""
+        self.final_qa_result = result
+        current_fp = self.workspace.fingerprint
+        # Release is eligible ONLY if validation passed AND matches current workspace fingerprint
+        is_fresh = bool(result.workspace_fingerprint and result.workspace_fingerprint == current_fp)
+        # If fingerprint wasn't recorded (legacy/test), fallback to result.passed
+        self.release_eligible = result.passed and (is_fresh if result.workspace_fingerprint else True)
+        if self.release_eligible:
+            self.add_note("Final QA passed on current workspace — project is release eligible.")
+        else:
+            self.add_note(
+                f"Final QA {'FAILED' if not result.passed else 'STALE'} with {result.failed_commands} failing command(s). "
+                "ZIP release is blocked."
+            )
+
+    @property
+    def repair_cycle_count(self) -> int:
+        return len(self.repair_cycles)
+
+    @property
+    def last_validation(self) -> ValidationResult | None:
+        return self.validation_runs[-1] if self.validation_runs else None
 
     # --- derived views ---------------------------------------------------
 
@@ -331,6 +467,17 @@ class SharedProjectMemory:
             ]
             lines.append("API ENDPOINTS:\n  " + "\n  ".join(endpoints))
 
+        # Validation status for agents that need to know
+        if self.validation_runs:
+            last = self.validation_runs[-1]
+            lines.append(
+                f"LAST VALIDATION: {'PASSED' if last.passed else 'FAILED'} "
+                f"({last.failed_commands} failures, stack={last.stack})"
+            )
+
+        if self.repair_cycles:
+            lines.append(f"REPAIR CYCLES: {len(self.repair_cycles)}")
+
         if include_files and len(self.workspace) > 0:
             lines.append(f"EXISTING FILES ({len(self.workspace)}):")
             lines.append(self.workspace.summary_for_prompt(limit=80))
@@ -359,4 +506,9 @@ class SharedProjectMemory:
             "notes": self.notes,
             "workspace": self.workspace.statistics(),
             "manifest": self.workspace.manifest(),
+            # Phase 2 additions
+            "validation_runs": [v.as_dict() for v in self.validation_runs],
+            "repair_cycles": [r.as_dict() for r in self.repair_cycles],
+            "final_qa_result": self.final_qa_result.as_dict() if self.final_qa_result else None,
+            "release_eligible": self.release_eligible,
         }

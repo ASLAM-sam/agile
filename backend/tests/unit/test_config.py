@@ -32,6 +32,15 @@ MANAGED_VARIABLES = (
     "LOG_FORMAT",
     "LOG_LEVEL",
     "SECRET_KEY",
+    "PLANNER_API_KEY01",
+    "FRONTEND_API_KEY01",
+    "BACKEND_API_KEY01",
+    "DATABASE_API_KEY01",
+    "QA_API_KEY01",
+    "REVIEW_API_KEY01",
+    "DEBUG_API_KEY01",
+    "GEMINI_MODEL",
+    "GEMINI_ALLOWED_MODEL",
 )
 
 SettingsBuilder = Callable[..., Settings]
@@ -186,7 +195,8 @@ class TestBlankOptionalsBecomeNone:
     @pytest.mark.parametrize(
         "variable, attribute",
         [
-            ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+            ("FRONTEND_API_KEY01", "frontend_api_key01"),
+            ("BACKEND_API_KEY01", "backend_api_key01"),
             ("BOOTSTRAP_ADMIN_EMAIL", "bootstrap_admin_email"),
             ("BOOTSTRAP_ADMIN_PASSWORD", "bootstrap_admin_password"),
         ],
@@ -196,12 +206,20 @@ class TestBlankOptionalsBecomeNone:
     ) -> None:
         assert getattr(build(**{variable: ""}), attribute) is None
 
-    def test_llm_is_not_configured_when_the_key_is_blank(self, build: SettingsBuilder) -> None:
-        assert build(ANTHROPIC_API_KEY="").llm_configured is False
+    def test_llm_is_not_configured_when_all_keys_are_blank(self, build: SettingsBuilder) -> None:
+        assert build(
+            PLANNER_API_KEY01="",
+            FRONTEND_API_KEY01="",
+            BACKEND_API_KEY01="",
+            DATABASE_API_KEY01="",
+            QA_API_KEY01="",
+            REVIEW_API_KEY01="",
+            DEBUG_API_KEY01="",
+        ).llm_configured is False
 
-    def test_llm_is_configured_when_a_key_is_present(self, build: SettingsBuilder) -> None:
-        assert build(ANTHROPIC_API_KEY="sk-ant-test").llm_configured is True
-
+    def test_llm_is_configured_when_any_gemini_key_is_present(self, build: SettingsBuilder) -> None:
+        settings = build(FRONTEND_API_KEY01="AIza-test-key-12345")
+        assert settings.llm_configured is True
 
 class TestDatabaseUrlNormalisation:
     """Sync driver URLs are coerced to their async equivalents."""
@@ -267,3 +285,54 @@ class TestProductionGuards:
         )
         assert settings.is_sqlite
         assert len(settings.secret_key) >= 32
+
+
+class TestModelConfiguration:
+    """The only allowed Gemini model is gemini-3.6-flash, strictly centralized."""
+
+    def test_default_models(self, build: SettingsBuilder) -> None:
+        settings = build()
+        assert settings.gemini_model == "gemini-3.6-flash"
+        assert settings.gemini_allowed_model == "gemini-3.6-flash"
+
+    def test_gemini_model_is_centralized(self, build: SettingsBuilder) -> None:
+        settings = build(
+            FRONTEND_API_KEY01="key1",
+            BACKEND_API_KEY01="key2",
+            QA_API_KEY01="key3",
+        )
+        assert settings.gemini_model == "gemini-3.6-flash"
+        assert settings.gemini_allowed_model == "gemini-3.6-flash"
+
+
+class TestLLMConfigurationAliases:
+    """Test LLM configuration aliases such as DEFAULT_LLM_PROVIDER, DEFAULT_LLM_MODEL, etc."""
+
+    def test_default_aliases_accepted(self, build: SettingsBuilder) -> None:
+        settings = build(
+            DEFAULT_LLM_PROVIDER="gemini",
+            DEFAULT_LLM_MODEL="gemini-3.6-flash",
+            LLM_REQUEST_TARGET="12",
+            LLM_REQUEST_HARD_MAX="18",
+            DEFAULT_FRONTEND_STACK="html_css_js",
+        )
+        assert settings.default_provider == "gemini"
+        assert settings.default_model == "gemini-3.6-flash"
+        assert settings.target_requests_per_task == 12
+        assert settings.hard_max_requests_per_task == 18
+        assert settings.default_frontend_stack == "html_css_js"
+
+    def test_standard_names_also_accepted(self, build: SettingsBuilder) -> None:
+        settings = build(
+            DEFAULT_PROVIDER="gemini",
+            DEFAULT_MODEL="gemini-3.6-flash",
+            TARGET_REQUESTS_PER_TASK="10",
+            HARD_MAX_REQUESTS_PER_TASK="15",
+            DEFAULT_FRONTEND_STACK="html_css_js",
+        )
+        assert settings.default_provider == "gemini"
+        assert settings.default_model == "gemini-3.6-flash"
+        assert settings.target_requests_per_task == 10
+        assert settings.hard_max_requests_per_task == 15
+        assert settings.default_frontend_stack == "html_css_js"
+

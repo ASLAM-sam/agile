@@ -89,15 +89,21 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
     # --- completions -----------------------------------------------------
 
-    async def complete_text(self, prompt: PromptBundle) -> TextCompletion:
-        text, usage, finish, model = await self._chat(prompt, schema=None)
-        return TextCompletion(text=text, usage=usage, stop_reason=finish, model=model)
+    async def complete_text(
+        self, prompt: PromptBundle, *, model: str | None = None
+    ) -> TextCompletion:
+        text, usage, finish, resolved_model = await self._chat(prompt, schema=None, model=model)
+        return TextCompletion(text=text, usage=usage, stop_reason=finish, model=resolved_model)
 
-    async def complete_structured(self, prompt: PromptBundle) -> Completion:
+    async def complete_structured(
+        self, prompt: PromptBundle, *, model: str | None = None
+    ) -> Completion:
         if prompt.schema is None:
             raise ValueError("complete_structured requires a schema on the PromptBundle.")
 
-        text, usage, finish, model = await self._chat(prompt, schema=prompt.schema)
+        text, usage, finish, resolved_model = await self._chat(
+            prompt, schema=prompt.schema, model=model
+        )
 
         if finish == "length":
             raise tag(
@@ -140,14 +146,18 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             data=payload,
             usage=usage,
             stop_reason=finish,
-            model=model,
+            model=resolved_model,
             raw_text=text,
         )
 
     # --- transport -------------------------------------------------------
 
     async def _chat(
-        self, prompt: PromptBundle, *, schema: dict[str, Any] | None
+        self,
+        prompt: PromptBundle,
+        *,
+        schema: dict[str, Any] | None,
+        model: str | None = None,
     ) -> tuple[str, TokenUsage, str, str]:
         system = prompt.cacheable_system
         if prompt.volatile_system:
@@ -160,8 +170,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         if self.spec.max_output_tokens:
             requested_output = min(requested_output, self.spec.max_output_tokens)
 
+        effective_model = model or self.model
         body: dict[str, Any] = {
-            "model": self.model,
+            "model": effective_model,
             "max_tokens": requested_output,
             "messages": [
                 {"role": "system", "content": system},

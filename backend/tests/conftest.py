@@ -24,6 +24,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production-use-only")
 os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
+os.environ.setdefault("AEGIS_MOCK_VALIDATION", "true")
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

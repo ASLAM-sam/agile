@@ -30,6 +30,8 @@ class AgentStatus(StrEnum):
     COMPLETED = "completed"
     SKIPPED = "skipped"
     FAILED = "failed"
+    BLOCKED = "blocked"
+    REPAIRED = "repaired"
 
 
 class AgentRole(StrEnum):
@@ -45,6 +47,7 @@ class AgentRole(StrEnum):
     QA_ENGINEER = "qa_engineer"
     REVIEW_ENGINEER = "review_engineer"
     IMPROVEMENT_ENGINEER = "improvement_engineer"
+    FINAL_QA = "final_qa"
     ARTIFACT_MANAGER = "artifact_manager"
 
 

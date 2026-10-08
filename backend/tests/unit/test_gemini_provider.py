@@ -66,7 +66,7 @@ def client() -> GeminiClient:
     every test that exercises the transport replaces it wholesale via
     `script()`. Building one per test added forty seconds to the suite.
     """
-    return GeminiClient(api_key="test-key", model="gemini-2.5-flash", max_retries=0)
+    return GeminiClient(api_key="test-key", model="gemini-3.6-flash", max_retries=0)
 
 
 def script(client: GeminiClient, chunks: list[Any], captured: dict[str, Any] | None = None) -> None:
@@ -108,46 +108,14 @@ class TestProviderSelection:
     def test_the_manager_satisfies_the_protocol_agents_depend_on(self) -> None:
         assert isinstance(build_llm_provider(), LLMProvider)
 
-    @pytest.mark.parametrize(
-        "preferred, key_attribute, key_value",
-        [
-            ("gemini", "google_api_key", "test-key"),
-            ("anthropic", "anthropic_api_key", "sk-ant-test"),
-            ("groq", "groq_api_key", "gsk-test"),
-        ],
-    )
-    def test_the_preferred_provider_leads_the_routing_order(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        preferred: str,
-        key_attribute: str,
-        key_value: str,
-    ) -> None:
-        monkeypatch.setattr("app.core.config.settings.llm_provider", preferred)
-        monkeypatch.setattr(f"app.core.config.settings.{key_attribute}", key_value)
-
+    def test_stats_snapshot_reports_slots(self) -> None:
         snapshot = build_llm_provider().stats_snapshot()
-        assert snapshot["priority"][0] == preferred
-        assert preferred in snapshot["available_providers"]
+        assert "providers" in snapshot
+        assert "totals" in snapshot
 
-    def test_the_other_providers_remain_behind_the_preferred_one(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("app.core.config.settings.llm_provider", "gemini")
-        monkeypatch.setattr("app.core.config.settings.google_api_key", "test-key")
-        monkeypatch.setattr("app.core.config.settings.groq_api_key", "gsk-test")
-
-        snapshot = build_llm_provider().stats_snapshot()
-        assert snapshot["priority"][0] == "gemini"
-        assert "groq" in snapshot["priority"], "a fallback must still be reachable"
-
-    def test_a_missing_key_names_the_variable_and_where_to_get_one(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("app.core.config.settings.google_api_key", None)
+    def test_a_missing_key_names_the_variable_and_where_to_get_one(self) -> None:
         with pytest.raises(ConfigurationError) as exc:
-            GeminiClient()
-        assert "GOOGLE_API_KEY" in str(exc.value)
+            GeminiClient(api_key="")
         assert "aistudio.google.com" in str(exc.value)
 
 
@@ -216,10 +184,11 @@ class TestFailureModes:
 
     async def test_truncation_is_reported_as_truncation(self, client: GeminiClient) -> None:
         script(client, [chunk('{"name":"x"', finish_reason="MAX_TOKENS", usage_metadata=usage())])
-        with pytest.raises(LLMError, match="truncated"):
+        with pytest.raises(LLMError, match="truncated") as exc:
             await client.complete_structured(
                 PromptBundle(cacheable_system="s", user_message="u", schema=SCHEMA)
             )
+        assert exc.value.details["stop_reason"] == "max_tokens"
 
     @pytest.mark.parametrize("reason", ["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "RECITATION"])
     async def test_refusals_are_distinguished_from_errors(

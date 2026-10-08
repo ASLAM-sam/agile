@@ -85,7 +85,7 @@ async def get_project(
     if project.runs:
         latest = project.runs[0]
         detail.latest_run_id = latest.id
-        detail.latest_run_status = latest.status.value
+        detail.latest_run_status = latest.status.value if hasattr(latest.status, "value") else str(latest.status)
     return detail
 
 

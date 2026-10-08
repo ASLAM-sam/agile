@@ -16,13 +16,16 @@ from app.api.deps import (
     ProjectServiceDep,
     SessionDep,
 )
-from app.core.enums import EventType, RunStatus
+from app.core.enums import ArtifactKind, EventType, RunStatus
 from app.core.logging import get_logger
+from app.packaging.zip_builder import ZipPackager
+from app.repositories.artifact_repository import ArtifactRepository
 from app.repositories.run_repository import RunEventRepository, RunRepository
 from app.schemas.common import MessageResponse
 from app.schemas.generation import (
     AgentExecutionResponse,
     AnalysisResponse,
+    RunArtifactInfo,
     RunDetail,
     RunEventResponse,
     RunSummary,
@@ -92,6 +95,71 @@ async def start_run(
     return detail
 
 
+def _populate_artifact_fields(target: Any, run: Any) -> None:
+    pkg = next((a for a in getattr(run, "artifacts", []) if getattr(a, "kind", None) in {ArtifactKind.PACKAGE, "package"}), None)
+    packager = ZipPackager()
+    package_path = None
+    if pkg and pkg.storage_path:
+        try:
+            package_path = packager.resolve(pkg.storage_path, run_id=run.id)
+        except Exception:
+            package_path = None
+
+    if package_path is None or not package_path.is_file():
+        package_path = packager.find_run_package(run.id)
+
+    if package_path is None or not package_path.is_file():
+        project_slug = getattr(run.project, "slug", "project") if getattr(run, "project", None) else "project"
+        package_path = packager.materialize_from_preserved_temp(
+            run_id=run.id,
+            project_slug=project_slug,
+        )
+
+    has_package_file = package_path is not None and package_path.is_file()
+    is_packaging = run.status == RunStatus.PACKAGING or getattr(run, "phase", None) == "packaging"
+
+    if has_package_file and not is_packaging:
+        is_partial = (
+            bool((pkg.artifact_metadata or {}).get("is_partial", False))
+            if pkg and pkg.artifact_metadata
+            else (
+                "partial" in package_path.name
+                or run.status == RunStatus.FAILED
+                or not getattr(run, "release_eligible", False)
+            )
+        )
+        filename = (
+            (pkg.artifact_metadata or {}).get("filename")
+            if pkg and pkg.artifact_metadata
+            else ("project-partial.zip" if is_partial else "project.zip")
+        )
+        if not filename.endswith(".zip"):
+            filename += ".zip"
+        dl_url = f"/api/generations/{run.id}/artifact"
+
+        target.artifact = RunArtifactInfo(
+            available=True,
+            type="partial" if is_partial else "full",
+            name=filename,
+            download_url=dl_url,
+            artifact_available=True,
+            artifact_type="partial" if is_partial else "success",
+            artifact_name=filename,
+        )
+        target.artifact_available = True
+        target.artifact_type = "partial" if is_partial else "success"
+        target.artifact_name = filename
+        target.download_url = dl_url
+        target.release_eligible = not is_partial and run.status == RunStatus.COMPLETED
+    else:
+        target.artifact = None
+        target.artifact_available = False
+        target.artifact_type = None
+        target.artifact_name = None
+        target.download_url = None
+        target.release_eligible = False
+
+
 @router.get(
     "/runs/{run_id}",
     response_model=RunDetail,
@@ -109,6 +177,8 @@ async def get_run(
         for execution in sorted(run.agent_executions, key=lambda e: e.sequence)
     ]
     detail.artifact_count = len(run.artifacts)
+
+    _populate_artifact_fields(detail, run)
     return detail
 
 
@@ -124,7 +194,12 @@ async def list_runs(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[RunSummary]:
     runs = await RunRepository(session).list_recent_for_owner(user.id, limit=limit)
-    return [RunSummary.model_validate(run) for run in runs]
+    results: list[RunSummary] = []
+    for run in runs:
+        summary = RunSummary.model_validate(run)
+        _populate_artifact_fields(summary, run)
+        results.append(summary)
+    return results
 
 
 @router.get(

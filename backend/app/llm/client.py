@@ -46,7 +46,7 @@ class LLMClient:
         model: str | None = None,
         max_retries: int | None = None,
     ) -> None:
-        key = api_key or settings.anthropic_api_key
+        key = api_key or getattr(settings, "anthropic_api_key", None)
         if not key:
             raise ConfigurationError(
                 "ANTHROPIC_API_KEY is not configured. Set it in the environment "
@@ -57,7 +57,7 @@ class LLMClient:
             timeout=settings.llm_timeout_seconds,
             max_retries=0,  # retry policy is owned by this class
         )
-        self._model = model or settings.llm_model
+        self._model = model or getattr(settings, "llm_model", "claude-3-7-sonnet-20250219")
         self._max_retries = max_retries if max_retries is not None else settings.llm_max_retries
 
     @property
@@ -77,7 +77,7 @@ class LLMClient:
         message = await self._send(
             prompt,
             output_config={
-                "effort": prompt.effort or settings.llm_effort,
+                "effort": prompt.effort or getattr(settings, "llm_effort", "medium"),
                 "format": {"type": "json_schema", "schema": prompt.schema},
             },
         )

@@ -81,7 +81,7 @@ class ReviewEngineerAgent(Agent):
         source_files = [
             f
             for f in ctx.memory.workspace.files
-            if f.extension in {".py", ".ts", ".tsx", ".js", ".jsx", ".java"}
+            if f.extension in {".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".html", ".css"}
         ]
         if len(source_files) < 3:
             return SkipDecision.skip(
@@ -156,7 +156,7 @@ a security defect or a broken core feature."""
                     "consequence."
                 ),
                 schema=REVIEW_SCHEMA,
-                max_tokens=24000,
+                max_tokens=6000,
             )
         )
 
@@ -226,7 +226,7 @@ a security defect or a broken core feature."""
 
         candidates = sorted(
             (f for f in workspace.files if f.extension in
-             {".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".sql"}),
+             {".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".sql", ".html", ".css"}),
             key=lambda f: (rank(f.path), f.path),
         )
 

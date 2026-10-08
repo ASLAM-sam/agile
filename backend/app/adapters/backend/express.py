@@ -22,11 +22,10 @@ class ExpressAdapter(BackendAdapter):
         "Realtime and streaming APIs",
         "Projects that value a single language across client and server",
     )
-    supported_databases = ("postgresql", "mysql", "sqlite")
+    supported_databases = ("mongodb", "sqlite")
 
     _DRIVERS = {
-        "postgresql": {"pg": "^8.13.1", "@types/pg": "^8.11.10"},
-        "mysql": {"mysql2": "^3.11.4"},
+        "mongodb": {"mongodb": "^6.12.0"},
         "sqlite": {"better-sqlite3": "^11.5.0", "@types/better-sqlite3": "^7.6.11"},
     }
 
@@ -135,15 +134,7 @@ class ExpressAdapter(BackendAdapter):
             return ""
         if ctx.database_key == "sqlite":
             return f"./{ctx.package_name}.db"
-        if ctx.database_key == "mysql":
-            return (
-                f"mysql://{ctx.package_name}:{ctx.package_name}_password"
-                f"@localhost:3306/{ctx.package_name}"
-            )
-        return (
-            f"postgresql://{ctx.package_name}:{ctx.package_name}_password"
-            f"@localhost:5432/{ctx.package_name}"
-        )
+        return f"mongodb://localhost:27017/{ctx.package_name}"
 
     def env_template(self, ctx: ScaffoldContext, database_url: str) -> str:
         lines = [
@@ -214,8 +205,8 @@ CMD ["node", "dist/server.js"]
         ]
         if ctx.needs_database:
             sections += [
-                "  repositories/<res>.repository.ts  All SQL lives here",
-                "  db/index.ts             Connection pool + query helper",
+                "  repositories/<res>.repository.ts  All persistence access lives here",
+                "  db/index.ts             Client lifecycle + database helper",
             ]
         sections += [
             "  middleware/errorHandler.ts   Central error-to-response mapping",
@@ -250,19 +241,20 @@ CMD ["node", "dist/server.js"]
         ]
         if ctx.needs_database:
             driver = {
-                "postgresql": "`pg` with a `Pool`, parameterised `$1, $2` placeholders",
-                "mysql": "`mysql2/promise` with a pool, parameterised `?` placeholders",
+                "mongodb": "the official `mongodb` `MongoClient` with `DATABASE_URL`",
                 "sqlite": "`better-sqlite3`, parameterised `?` placeholders",
             }.get(ctx.database_key or "sqlite", "the configured driver")
             sections += [
                 "",
                 "## Database",
                 f"- Use {driver}.",
-                "- Every query is parameterised. String concatenation into SQL is "
-                "forbidden without exception.",
-                "- Repositories own all SQL and return typed domain objects, never raw "
-                "driver rows.",
-                "- Queries must match the SQL schema already produced for this project.",
+                "- Create one shared client during application startup and close it during "
+                "shutdown; repositories must not open per-request connections.",
+                "- Repositories own all persistence calls and return typed domain objects, "
+                "never raw driver values.",
+                "- MongoDB projects use collection operations and aggregation pipelines, never SQL; "
+                "SQLite queries are always parameterised.",
+                "- Persistence code must match the generated database schema for this project.",
             ]
         if ctx.needs_auth:
             sections += [

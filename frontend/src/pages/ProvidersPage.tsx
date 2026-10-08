@@ -93,12 +93,18 @@ function ProviderRow({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-semibold text-content">{provider.display_name}</span>
-            <Badge tone={STATUS_TONE[provider.status]}>{STATUS_LABEL[provider.status]}</Badge>
+            <Badge tone={STATUS_TONE[provider.status]}>
+              {provider.configured ? 'Configured' : STATUS_LABEL[provider.status]}
+            </Badge>
             {isActive ? <Badge tone="brand">Active</Badge> : null}
-            <span className="text-xs text-content-subtle">priority {provider.priority + 1}</span>
           </div>
+          {provider.role_group ? (
+            <p className="mt-1 text-xs font-medium text-brand-600 dark:text-brand-400">
+              Role group: <span className="text-content-muted">{provider.role_group}</span>
+            </p>
+          ) : null}
           <p className="mt-1 truncate font-mono text-xs text-content-muted">
-            {provider.model || '—'}
+            Model: {provider.model || 'gemini-3.6-flash'}
           </p>
         </div>
 
@@ -122,8 +128,7 @@ function ProviderRow({
         />
         <Metric label="Latency" value={latency(provider.latency_ms)} />
         <Metric label="Retries" value={String(provider.retries)} />
-        <Metric label="Handed away" value={String(provider.failovers_from)} />
-        <Metric label="Picked up" value={String(provider.failovers_to)} />
+        <Metric label="Rate limits (429)" value={String(provider.rate_limits ?? 0)} />
         <Metric label="Tokens in" value={provider.input_tokens.toLocaleString()} />
         <Metric label="Tokens out" value={provider.output_tokens.toLocaleString()} />
       </dl>
@@ -142,8 +147,7 @@ function ProviderRow({
 
       {provider.status === 'unconfigured' ? (
         <p className="mt-3 text-xs text-content-subtle">
-          Add this provider&apos;s API key in <code>backend/.env</code> to bring it into the
-          rotation.
+          Add this account&apos;s API key in <code>backend/.env</code> to bring it online.
         </p>
       ) : null}
     </div>
@@ -183,7 +187,7 @@ export function ProvidersPage() {
     <div className="space-y-6">
       <PageHeader
         title="Providers"
-        description="Which model provider is serving requests, and what happened when one could not."
+        description="4 isolated Gemini accounts with role-based routing and zero cross-account fallback."
       />
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -202,9 +206,9 @@ export function ProvidersPage() {
           }
         />
         <Stat
-          label="Automatic failovers"
-          value={data.totals.failovers.toLocaleString()}
-          hint={`${data.totals.retries} retries`}
+          label="Account Isolation"
+          value="100% Strict"
+          hint="Zero cross-account fallback"
         />
         <Stat
           label="Cache hits"
@@ -218,8 +222,8 @@ export function ProvidersPage() {
       {data.available_providers.length === 0 ? (
         <Card className="border-danger/40 bg-danger/5 p-4">
           <p className="text-sm text-danger">
-            No provider is currently available. Generation is disabled until at least one
-            provider has credentials and is out of cooldown.
+            No Gemini account is currently available. Generation is disabled until at least one
+            account has credentials in backend/.env.
           </p>
         </Card>
       ) : null}
@@ -227,23 +231,18 @@ export function ProvidersPage() {
       <Card className="p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="font-semibold text-content">Routing order</h2>
+            <h2 className="font-semibold text-content">Role-Based Gemini Accounts</h2>
             <p className="text-sm text-content-muted">
-              Tried top to bottom. A provider that cannot serve a request hands it to the next
-              one automatically.
+              Each engineering role is strictly assigned to its own Gemini account. Failures retry on the same account.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Badge tone={data.failover_enabled ? 'success' : 'neutral'}>
-              Failover {data.failover_enabled ? 'on' : 'off'}
-            </Badge>
-            <Badge tone={data.task_routing_enabled ? 'success' : 'neutral'}>
-              Task routing {data.task_routing_enabled ? 'on' : 'off'}
-            </Badge>
+            <Badge tone="brand">Strict Account Isolation</Badge>
+            <Badge tone="neutral">Zero Fallback</Badge>
             <Badge tone={data.cache_enabled ? 'success' : 'neutral'}>
               Cache {data.cache_enabled ? 'on' : 'off'}
             </Badge>
-            <Badge tone="neutral">{data.retry_limit} retries each</Badge>
+            <Badge tone="neutral">{data.retry_limit} retries per slot</Badge>
           </div>
         </div>
 

@@ -26,16 +26,16 @@ def ctx() -> ScaffoldContext:
         needs_frontend=True,
         frontend_key="react",
         backend_key="fastapi",
-        database_key="postgresql",
+        database_key="sqlite",
         entities=["Patient", "Appointment"],
     )
 
 
 class TestRegistry:
     def test_every_first_party_adapter_is_registered(self, adapters: AdapterRegistry) -> None:
-        assert set(adapters.keys(AdapterKind.FRONTEND)) == {"react", "nextjs", "angular"}
+        assert set(adapters.keys(AdapterKind.FRONTEND)) == {"html_css_js", "react", "nextjs", "angular"}
         assert set(adapters.keys(AdapterKind.BACKEND)) == {"fastapi", "express", "spring-boot"}
-        assert set(adapters.keys(AdapterKind.DATABASE)) == {"postgresql", "mysql", "sqlite"}
+        assert set(adapters.keys(AdapterKind.DATABASE)) == {"mongodb", "sqlite"}
 
     def test_unknown_adapter_reports_the_alternatives(self, adapters: AdapterRegistry) -> None:
         with pytest.raises(AdapterNotFoundError) as caught:
@@ -52,7 +52,9 @@ class TestRegistry:
     def test_catalogue_covers_every_kind(self, adapters: AdapterRegistry) -> None:
         catalogue = adapters.catalogue()
         assert set(catalogue) == {"frontend", "backend", "database"}
-        assert all(len(entries) == 3 for entries in catalogue.values())
+        assert [entry.key for entry in catalogue["database"]] == ["mongodb", "sqlite"]
+        assert len(catalogue["frontend"]) == 4
+        assert len(catalogue["backend"]) == 3
 
 
 class TestScaffolds:
@@ -65,8 +67,8 @@ class TestScaffolds:
             (AdapterKind.BACKEND, "fastapi"),
             (AdapterKind.BACKEND, "express"),
             (AdapterKind.BACKEND, "spring-boot"),
-            (AdapterKind.DATABASE, "postgresql"),
-            (AdapterKind.DATABASE, "mysql"),
+            (AdapterKind.DATABASE, "mongodb"),
+            
             (AdapterKind.DATABASE, "sqlite"),
         ],
     )
@@ -110,7 +112,7 @@ class TestScaffolds:
         files = {f.path: f.content for f in adapters.backend("fastapi").scaffold(ctx)}
 
         assert "sqlalchemy" in files["backend/requirements.txt"]
-        assert "asyncpg" in files["backend/requirements.txt"]
+        assert "aiosqlite" in files["backend/requirements.txt"]
         assert "bcrypt" in files["backend/requirements.txt"]
         assert "DATABASE_URL" in files["backend/.env.example"]
         assert "SECRET_KEY" in files["backend/.env.example"]
@@ -179,17 +181,16 @@ class TestConventions:
         assert "Do not generate" in conventions
 
     def test_database_dialect_notes_are_specific(self, adapters: AdapterRegistry) -> None:
-        postgres = adapters.database("postgresql").sql_dialect_notes()
-        mysql = adapters.database("mysql").sql_dialect_notes()
+        mongodb = adapters.database("mongodb").sql_dialect_notes()
         sqlite = adapters.database("sqlite").sql_dialect_notes()
 
-        assert "BIGSERIAL" in postgres and "JSONB" in postgres
-        assert "AUTO_INCREMENT" in mysql and "utf8mb4" in mysql
+        assert "$jsonSchema" in mongodb and "ObjectId" in mongodb
+
         assert "AUTOINCREMENT" in sqlite and "foreign_keys" in sqlite
 
     def test_type_mappings_cover_the_canonical_types(self, adapters: AdapterRegistry) -> None:
         required = {"id", "string", "integer", "boolean", "timestamp", "json"}
-        for key in ("postgresql", "mysql", "sqlite"):
+        for key in ("mongodb", "sqlite"):
             mapping = adapters.database(key).type_mapping()
             assert required <= set(mapping), f"{key} is missing canonical types"
 
@@ -198,5 +199,6 @@ class TestCompatibility:
     def test_backends_declare_database_support(self, adapters: AdapterRegistry) -> None:
         for key in ("fastapi", "express", "spring-boot"):
             adapter = adapters.backend(key)
-            assert adapter.supports_database("postgresql")
-            assert not adapter.supports_database("mongodb")
+            assert adapter.supports_database("mongodb")
+            assert adapter.supports_database("sqlite")
+            assert not adapter.supports_database("postgresql")

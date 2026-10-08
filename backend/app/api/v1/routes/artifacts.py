@@ -6,7 +6,9 @@ from fastapi import APIRouter, Query, status
 from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, GenerationServiceDep, SessionDep
-from app.core.enums import ArtifactKind
+from app.core.enums import AgentRole, ArtifactKind, RunStatus
+from app.models.artifact import Artifact
+import re
 from app.core.exceptions import NotFoundError
 from app.packaging.zip_builder import ZipPackager
 from app.repositories.artifact_repository import ArtifactRepository
@@ -81,30 +83,105 @@ async def get_artifact(
     status_code=status.HTTP_200_OK,
     summary="Download the generated project as a ZIP",
 )
+@router.get(
+    "/runs/{run_id}/artifact",
+    response_class=FileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Download the generated project artifact as a ZIP",
+)
+@router.get(
+    "/generations/{run_id}/artifact",
+    response_class=FileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Download the generation artifact as a ZIP",
+)
 async def download_package(
     run_id: str,
     user: CurrentUser,
     generation: GenerationServiceDep,
     session: SessionDep,
 ) -> FileResponse:
-    """Stream the run's ZIP package."""
-    await generation.get_owned_run(run_id, user)
+    """Stream the run's ZIP package (full or partial)."""
+    if not re.match(r"^[a-zA-Z0-9_-]+$", run_id):
+        raise NotFoundError("Invalid generation identifier.")
 
-    artifact = await ArtifactRepository(session).find_package(run_id)
-    if artifact is None or not artifact.storage_path:
+    run = await generation.get_owned_run(run_id, user)
+
+    repo = ArtifactRepository(session)
+    artifact = await repo.find_package(run_id)
+    packager = ZipPackager()
+    path = None
+
+    if artifact and artifact.storage_path:
+        try:
+            path = packager.resolve(artifact.storage_path, run_id=run_id)
+        except Exception:
+            path = None
+
+    if path is None or not path.is_file():
+        path = packager.find_run_package(run_id)
+
+    if path is None or not path.is_file():
+        project_slug = run.project.slug if run.project else "project"
+        path = packager.materialize_from_preserved_temp(
+            run_id=run_id,
+            project_slug=project_slug,
+        )
+
+    if path is None or not path.is_file():
         raise NotFoundError(
             "No package is available for this run. It may still be generating, or it "
             "may have failed before packaging."
         )
 
-    # Re-validate the path against the artifact root rather than trusting the
-    # stored value, so a tampered database row cannot read arbitrary files.
-    path = ZipPackager().resolve(artifact.storage_path)
-    filename = (artifact.artifact_metadata or {}).get("filename") or path.name
+    is_partial = (
+        (artifact.artifact_metadata or {}).get("is_partial", False)
+        if artifact and artifact.artifact_metadata
+        else (
+            "partial" in path.name
+            or run.status == RunStatus.FAILED
+            or not run.release_eligible
+        )
+    )
+    filename = (
+        (artifact.artifact_metadata or {}).get("filename")
+        if artifact and artifact.artifact_metadata
+        else ("project-partial.zip" if is_partial else "project.zip")
+    )
+    if not filename.endswith(".zip"):
+        filename += ".zip"
+
+    if artifact is None:
+        try:
+            await repo.add(
+                Artifact(
+                    run_id=run.id,
+                    kind=ArtifactKind.PACKAGE,
+                    name=filename,
+                    description=f"{'Partial' if is_partial else 'Complete'} project ZIP package.",
+                    produced_by=AgentRole.ARTIFACT_MANAGER,
+                    version=1,
+                    content_type="application/zip",
+                    storage_path=str(path),
+                    size_bytes=path.stat().st_size,
+                    artifact_metadata={
+                        "filename": filename,
+                        "is_partial": is_partial,
+                        "release_eligible": not is_partial,
+                        "download_url": f"/api/v1/runs/{run.id}/download",
+                    },
+                )
+            )
+            await session.commit()
+        except Exception:
+            pass
 
     return FileResponse(
         path=path,
         media_type="application/zip",
         filename=filename,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": "application/zip",
+        },
     )

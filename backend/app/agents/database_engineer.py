@@ -91,14 +91,67 @@ SCHEMA_DESIGN_SCHEMA = s.obj(
     }
 )
 
+MONGO_SCHEMA_DESIGN_SCHEMA = s.obj(
+    {
+        "collections": s.array(
+            s.obj(
+                {
+                    "name": s.string("Collection name: plural, snake_case."),
+                    "purpose": s.string("What this collection stores."),
+                    "document_shape": s.array(
+                        s.obj(
+                            {
+                                "name": s.string("Field name, including nested paths where useful."),
+                                "type": s.string("MongoDB BSON type or ObjectId reference."),
+                                "required": s.boolean("Whether the validator requires this field."),
+                                "description": s.string("What this field holds."),
+                            }
+                        )
+                    ),
+                    "relationships": s.string(
+                        "Embedding/reference choice and its rationale. Empty if independent."
+                    ),
+                }
+            ),
+            description="Every collection required by the application.",
+        ),
+        "indexes": s.array(
+            s.obj(
+                {
+                    "name": s.string("Index name."),
+                    "collection": s.string("Collection being indexed."),
+                    "fields": s.string_array("Fields, in index order."),
+                    "unique": s.boolean("Whether the index enforces uniqueness."),
+                    "rationale": s.string("The query or constraint this index serves."),
+                }
+            )
+        ),
+        "schema_script": s.string(
+            "Complete executable mongosh JavaScript. Select the project database, create or modify "
+            "every collection with a $jsonSchema validator, then create every index."
+        ),
+        "seed_script": s.string(
+            "Executable mongosh JavaScript inserting minimal realistic reference documents."
+        ),
+        "migrations": s.array(
+            s.obj(
+                {
+                    "filename": s.string("e.g. '001_initial_schema.js'."),
+                    "description": s.string("What this migration does."),
+                    "script": s.string("Executable mongosh JavaScript for this migration."),
+                }
+            ),
+            description="Forward-only, numbered mongosh migrations. The first establishes the schema.",
+        ),
+        "notes": s.string("Document modelling, validation and indexing trade-offs."),
+    }
+)
+
 
 class DatabaseEngineerAgent(CodeAgent):
     role = AgentRole.DATABASE_ENGINEER
     display_name = "Database Engineer"
-    description = (
-        "Designs the relational schema, relationships, indexes and migrations — "
-        "only when the project actually persists data."
-    )
+    description = "Designs the selected database's schema, indexes and migrations."
     depends_on = (AgentRole.BUSINESS_ANALYST, AgentRole.SOLUTION_ARCHITECT)
     # A schema without entities or an architecture would be guesswork.
     requires = (AgentRole.BUSINESS_ANALYST, AgentRole.SOLUTION_ARCHITECT)
@@ -114,6 +167,32 @@ class DatabaseEngineerAgent(CodeAgent):
         return SkipDecision.run()
 
     def system_prompt(self, ctx: AgentContext) -> str:
+        if ctx.memory.tech_stack.database == "mongodb":
+            return """\
+ROLE: Database Engineer
+
+You design the MongoDB document model every other engineer codes against. The
+scripts you emit are run with `mongosh`, so they must be correct on the first run.
+
+## Requirements for the document model
+
+- Model every entity the Business Analyst identified as a collection, embedded
+  document, or intentionally documented reference.
+- Make embedding-versus-reference choices from access patterns and document them.
+- Every top-level document has `createdAt` and `updatedAt`; never store plaintext
+  passwords (use `passwordHash`).
+- Use MongoDB `$jsonSchema` validators with the correct BSON types and required
+  fields. Validation complements, never replaces, API validation.
+- Add a named index for every common filter, sort, uniqueness rule and reference.
+- Use `ObjectId` for `_id` and references unless an external stable identifier is
+  explicitly required.
+
+## Scripts must actually run
+
+`schema_script`, `seed_script`, and every migration are executed as-is with
+`mongosh`. They must select the target database, create collections and indexes
+in a safe order, and use valid JavaScript and MongoDB commands. Do not emit SQL.
+"""
         return """\
 ROLE: Database Engineer
 
@@ -154,35 +233,42 @@ has no table, the backend will have nowhere to store it."""
 
     async def execute(self, ctx: AgentContext) -> AgentResult:
         memory = ctx.memory
-        adapter = ctx.registry.database(memory.tech_stack.database or "postgresql")
+        adapter = ctx.registry.database(memory.tech_stack.database or "sqlite")
 
         await ctx.progress(self.role, 15, f"Designing the {adapter.display_name} schema")
 
         entities = ", ".join(memory.analysis.entities) or "as implied by the requirements"
         type_map = "\n".join(f"  {k} -> {v}" for k, v in adapter.type_mapping().items())
+        is_mongodb = adapter.key == "mongodb"
+        artifact_kind = "document model" if is_mongodb else "schema"
+        output_contract = (
+            "Model every entity as a collection or embedded document. Include collection validators, "
+            "indexes, executable mongosh schema and seed scripts, and JavaScript migrations. Do not emit SQL."
+            if is_mongodb
+            else "Model every entity listed. Add any join tables, lookup tables or audit columns the "
+            "requirements imply. The SQL must execute without modification."
+        )
 
         completion = await ctx.llm.complete_structured(
             self.build_prompt(
                 ctx,
                 instruction=(
-                    f"Design the complete {adapter.display_name} schema for this "
+                    f"Design the complete {adapter.display_name} {artifact_kind} for this "
                     "project.\n\n"
                     f"TARGET DIALECT: {adapter.display_name} {adapter.version}\n"
                     f"{adapter.sql_dialect_notes()}\n\n"
                     f"CANONICAL TYPE MAPPING:\n{type_map}\n\n"
                     f"ENTITIES TO MODEL: {entities}\n\n"
-                    "Model every entity listed. Add any join tables, lookup tables "
-                    "or audit columns the requirements imply. The SQL must execute "
-                    "without modification."
+                    + output_contract
                     + (
                         "\n\nThis project uses authentication, so include a users "
-                        "table with a `password_hash` column and whatever role or "
-                        "permission structure the requirements imply."
+                        + ("collection with a `passwordHash` field" if is_mongodb else "table with a `password_hash` column")
+                        + " and whatever role or permission structure the requirements imply."
                         if memory.needs_auth
                         else ""
                     )
                 ),
-                schema=SCHEMA_DESIGN_SCHEMA,
+                schema=MONGO_SCHEMA_DESIGN_SCHEMA if is_mongodb else SCHEMA_DESIGN_SCHEMA,
                 include_files=False,
                 max_tokens=28000,
             )
@@ -197,26 +283,31 @@ has no table, the backend will have nowhere to store it."""
             tables=data.get("tables", []),
             relationships=data.get("relationships", []),
             indexes=data.get("indexes", []),
+            collections=data.get("collections", []),
             schema_sql=data.get("schema_sql", ""),
             seed_sql=data.get("seed_sql", ""),
+            schema_script=data.get("schema_script", ""),
+            seed_script=data.get("seed_script", ""),
             migrations=data.get("migrations", []),
             notes=data.get("notes", ""),
         )
         memory.database = design
 
         written = 0
-        if design.schema_sql:
+        schema_content = design.schema_script if is_mongodb else design.schema_sql
+        seed_content = design.seed_script if is_mongodb else design.seed_sql
+        if schema_content:
             memory.workspace.write(
-                "database/schema.sql",
-                self._with_header(design.schema_sql, "Schema", memory.project_name, adapter),
-                description="Complete database schema: tables, constraints and indexes.",
+                f"database/{adapter.schema_filename}",
+                self._with_header(schema_content, "Schema", memory.project_name, adapter),
+                description="Complete database schema, validators and indexes.",
                 produced_by=self.role,
             )
             written += 1
-        if design.seed_sql:
+        if seed_content:
             memory.workspace.write(
-                "database/seed.sql",
-                self._with_header(design.seed_sql, "Seed data", memory.project_name, adapter),
+                f"database/{adapter.seed_filename}",
+                self._with_header(seed_content, "Seed data", memory.project_name, adapter),
                 description="Minimal reference data for local development.",
                 produced_by=self.role,
             )
@@ -224,15 +315,15 @@ has no table, the backend will have nowhere to store it."""
 
         for migration in design.migrations:
             filename = str(migration.get("filename", "")).strip()
-            sql = str(migration.get("sql", "")).strip()
-            if not filename or not sql:
+            script = str(migration.get("script" if is_mongodb else "sql", "")).strip()
+            if not filename or not script:
                 continue
-            if not filename.endswith(".sql"):
-                filename = f"{filename}.sql"
+            if not filename.endswith(adapter.migration_extension):
+                filename = f"{filename}{adapter.migration_extension}"
             memory.workspace.write(
                 f"database/migrations/{filename}",
                 self._with_header(
-                    sql,
+                    script,
                     str(migration.get("description", "Migration")),
                     memory.project_name,
                     adapter,
@@ -254,15 +345,20 @@ has no table, the backend will have nowhere to store it."""
 
         await ctx.log(
             self.role,
-            f"Designed {len(design.tables)} tables with {len(design.indexes)} indexes",
-            tables=[t.get("name") for t in design.tables][:20],
+            f"Designed {len(design.collections) if is_mongodb else len(design.tables)} "
+            f"{'collections' if is_mongodb else 'tables'} with {len(design.indexes)} indexes",
+            database_objects=[
+                item.get("name") for item in (design.collections if is_mongodb else design.tables)
+            ][:20],
         )
 
         confidence = self._confidence(design, memory.analysis.entities)
         memory.record_confidence("database", confidence)
 
         summary = (
-            f"{len(design.tables)} tables, {len(design.relationships)} relationships, "
+            f"{len(design.collections) if is_mongodb else len(design.tables)} "
+            f"{'collections' if is_mongodb else 'tables'}, "
+            f"{len(design.relationships)} relationships, "
             f"{len(design.indexes)} indexes and {len(design.migrations)} migrations "
             f"for {adapter.display_name}."
         )
@@ -279,32 +375,35 @@ has no table, the backend will have nowhere to store it."""
         )
 
     @staticmethod
-    def _with_header(sql: str, title: str, project: str, adapter: object) -> str:
-        name = getattr(adapter, "display_name", "SQL")
+    def _with_header(script: str, title: str, project: str, adapter: object) -> str:
+        name = getattr(adapter, "display_name", "Database")
+        prefix = getattr(adapter, "comment_prefix", "--")
         return (
-            f"-- {title} — {project}\n"
-            f"-- Target: {name}\n"
-            f"-- Generated by Aegis AI. Review before running against production data.\n\n"
-            f"{sql.strip()}\n"
+            f"{prefix} {title} — {project}\n"
+            f"{prefix} Target: {name}\n"
+            f"{prefix} Generated by Aegis AI. Review before running against production data.\n\n"
+            f"{script.strip()}\n"
         )
 
     @staticmethod
     def _confidence(design: DatabaseDesign, entities: list[str]) -> float:
-        table_names = {str(t.get("name", "")).lower() for t in design.tables}
+        is_mongodb = design.engine == "mongodb"
+        objects = design.collections if is_mongodb else design.tables
+        object_names = {str(item.get("name", "")).lower() for item in objects}
         covered = sum(
             1
             for entity in entities
-            if any(entity.lower().rstrip("s") in name for name in table_names)
+            if any(entity.lower().rstrip("s") in name for name in object_names)
         )
         coverage = covered / len(entities) if entities else 1.0
         checks = [
-            bool(design.schema_sql),
-            bool(design.seed_sql),
-            len(design.tables) >= 1,
-            len(design.indexes) >= len(design.tables),
+            bool(design.schema_script if is_mongodb else design.schema_sql),
+            bool(design.seed_script if is_mongodb else design.seed_sql),
+            len(objects) >= 1,
+            len(design.indexes) >= len(objects),
             bool(design.migrations),
             coverage >= 0.8,
-            bool(design.relationships) or len(design.tables) <= 1,
-            "primary key" in design.schema_sql.lower(),
+            bool(design.relationships) or len(objects) <= 1,
+            ("$jsonschema" in design.schema_script.lower()) if is_mongodb else "primary key" in design.schema_sql.lower(),
         ]
         return round(sum(checks) / len(checks), 3)

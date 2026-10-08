@@ -400,13 +400,19 @@ def _artifact_checklist(memory: SharedProjectMemory) -> list[dict[str, Any]]:
     ]
 
     if analysis.needs_database:
+        database_is_mongodb = memory.tech_stack.database == "mongodb"
+        schema_filename = "schema.js" if database_is_mongodb else "schema.sql"
+        object_count = len(memory.database.collections) if database_is_mongodb else len(memory.database.tables)
         checklist += [
             entry(
-                "Database Design",
-                bool(memory.database.tables),
-                f"{len(memory.database.tables)} tables",
+                "MongoDB Design" if database_is_mongodb else "Database Design",
+                bool(memory.database.collections) if database_is_mongodb else bool(memory.database.tables),
+                f"{object_count} {'collections' if database_is_mongodb else 'tables'}",
             ),
-            entry("SQL Schema", workspace.exists("database/schema.sql")),
+            entry(
+                "MongoDB Schema" if database_is_mongodb else "SQL Schema",
+                workspace.exists(f"database/{schema_filename}"),
+            ),
             entry(
                 "Migration Scripts",
                 bool(memory.database.migrations),

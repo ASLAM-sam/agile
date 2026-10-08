@@ -11,6 +11,7 @@ before the run finishes.
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -27,14 +28,20 @@ from app.core.enums import (
     LogLevel,
     RunStatus,
 )
-from app.core.exceptions import ConfigurationError, NotFoundError
+from app.core.exceptions import ConfigurationError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.session import session_scope
 from app.llm.factory import build_llm_provider
 from app.llm.protocol import LLMProvider
+from app.validation.executor import WorkspaceValidator
 from app.models.agent_execution import AgentExecution
 from app.models.artifact import Artifact
 from app.models.run_event import RunEvent
+from app.packaging.diagnostics import (
+    build_diagnostics,
+    build_generation_status_readme,
+    count_preserved_files,
+)
 from app.packaging.report import build_report, render_report_markdown
 from app.packaging.zip_builder import ZipPackager
 from app.repositories.artifact_repository import ArtifactRepository
@@ -43,7 +50,7 @@ from app.repositories.run_repository import (
     RunEventRepository,
     RunRepository,
 )
-from app.workflow.engine import StepOutcome, WorkflowEngine, preflight_skips
+from app.workflow.engine import StepOutcome, WorkflowEngine, WorkflowOutcome, preflight_skips
 from app.workflow.events import RunEventBus, RunEventMessage, get_event_bus
 from app.workflow.memory import RequirementAnalysis, SharedProjectMemory, TechStack
 from app.workflow.planner import PlannedStep, WorkflowPlan, build_plan
@@ -128,8 +135,8 @@ class RunOrchestrator:
             if not settings.llm_configured:
                 raise ConfigurationError(
                     f"{settings.active_api_key_variable} is not configured, so generation "
-                    f"cannot run. Set it in backend/.env for the selected provider "
-                    f"({settings.llm_provider})."
+                    f"cannot run. Set at least one provider API key in backend/.env "
+                    f"(e.g. FRONTEND_API_KEY, BACKEND_API_KEY, or provider-specific keys)."
                 )
             llm = self._llm_factory()
 
@@ -175,19 +182,83 @@ class RunOrchestrator:
                     description="How this project was generated, and by whom.",
                     produced_by=AgentRole.ARTIFACT_MANAGER,
                 )
-                package = self._packager.write(
-                    memory.workspace, run_id=run_id, project_slug=memory.project_slug
-                )
+
+                # Strict Release Gate: Only package as complete if release_eligible is True and outcome hasn't failed
+                if memory.release_eligible and not outcome.failed:
+                    package = self._packager.write(
+                        memory.workspace, run_id=run_id, project_slug=memory.project_slug
+                    )
+
+                    # Independent ZIP extraction & validation gate
+                    with tempfile.TemporaryDirectory(prefix=f"aegis-zip-val-{run_id[:8]}-") as extract_dir:
+                        try:
+                            from app.packaging.zip_builder import extract_and_verify_zip
+                            extracted = extract_and_verify_zip(package.path, extract_dir)
+                            if not extracted:
+                                raise ValidationError("Extracted ZIP archive contains no readable source files.")
+
+                            validator = WorkspaceValidator(timeout_seconds=180)
+                            val_run = await validator.validate(extracted, run_id=f"{run_id}-zip-val")
+                            if not val_run.passed:
+                                raise ValidationError(
+                                    f"Independent validation of packaged ZIP failed ({len(val_run.failed_commands)} command(s) failed)."
+                                )
+                            logger.info("zip_independent_validation_passed", extra={"run_id": run_id})
+                        except Exception as val_exc:
+                            logger.error(
+                                "zip_independent_validation_failed",
+                                extra={"run_id": run_id, "error": str(val_exc)},
+                            )
+                            # CRITICAL INVARIANT: RELEASE BLOCKED != ARTIFACT DELETED.
+                            # Never delete the only generated package without preserving the partial archive.
+                            memory.release_eligible = False
+                            outcome.failed = True
+                            outcome.failure_reason = f"Release blocked: independent validation of extracted ZIP failed: {val_exc}"
+                            memory.workspace.write(
+                                "AEGIS_FAILURE_REPORT.md",
+                                _render_failure_report(memory, outcome),
+                                description="Detailed report of independent validation failure preventing release.",
+                                produced_by=AgentRole.ARTIFACT_MANAGER,
+                            )
+                            # Create and verify the partial package before temporary extract_dir cleans up
+                            package = self._create_partial_package(
+                                run_id=run_id,
+                                memory=memory,
+                                outcome=outcome,
+                                ctx=ctx,
+                                failed_stage="Independent ZIP Validation",
+                                failed_command=getattr(val_exc, "command", "npm run build"),
+                                val_run=val_run if "val_run" in locals() else None,
+                            )
+                else:
+                    outcome.failed = True
+                    if not outcome.failure_reason:
+                        outcome.failure_reason = "Release blocked: project failed validation or final QA gate."
+                    memory.workspace.write(
+                        "AEGIS_FAILURE_REPORT.md",
+                        _render_failure_report(memory, outcome),
+                        description="Detailed audit report of validation failures preventing release.",
+                        produced_by=AgentRole.ARTIFACT_MANAGER,
+                    )
+                    failed_stage = self._determine_failed_stage(memory, outcome)
+                    package = self._create_partial_package(
+                        run_id=run_id,
+                        memory=memory,
+                        outcome=outcome,
+                        ctx=ctx,
+                        failed_stage=failed_stage,
+                    )
+
                 report = build_report(
                     memory,
                     outcome,
-                    package_filename=package.filename,
-                    package_size_bytes=package.size_bytes,
+                    package_filename=package.filename if package else None,
+                    package_size_bytes=package.size_bytes if package else 0,
                 )
             else:
                 report = build_report(memory, outcome)
 
-            await self._persist_artifacts(run_id, memory, report, package)
+            await self._persist_artifacts(run_id, memory, report, package, outcome=outcome)
 
             duration = round(time.perf_counter() - started_perf, 3)
             final_status = RunStatus.FAILED if outcome.failed else RunStatus.COMPLETED
@@ -242,7 +313,56 @@ class RunOrchestrator:
         except Exception as exc:  # noqa: BLE001 - orchestrator must never crash
             logger.exception("run_failed", extra={"run_id": run_id})
             message = getattr(exc, "message", None) or f"{type(exc).__name__}: {exc}"
-            await self._fail(run_id, message)
+
+            # CRITICAL: Preserve workspace if any files were generated!
+            if memory is not None and len(memory.workspace) > 0:
+                try:
+                    outcome = WorkflowOutcome(
+                        plan=plan if "plan" in locals() else None,  # type: ignore
+                        failed=True,
+                        failure_reason=message,
+                    )
+                    failed_stage = type(exc).__name__
+                    if "Budget" in failed_stage:
+                        failed_stage = "Request Budget Exhaustion"
+                    elif "Timeout" in failed_stage:
+                        failed_stage = "LLM Timeout"
+
+                    package = self._create_partial_package(
+                        run_id=run_id,
+                        memory=memory,
+                        outcome=outcome,
+                        ctx=ctx if "ctx" in locals() else None,
+                        failed_stage=failed_stage,
+                    )
+                    report = build_report(
+                        memory,
+                        outcome,
+                        package_filename=package.filename if package else None,
+                        package_size_bytes=package.size_bytes if package else 0,
+                    )
+                    await self._persist_artifacts(run_id, memory, report, package, outcome=outcome)
+                    duration = round(time.perf_counter() - started_perf, 3) if "started_perf" in locals() else 0.0
+                    await self._finalise(
+                        run_id,
+                        status=RunStatus.FAILED,
+                        report=report,
+                        memory=memory,
+                        outcome_usage=outcome.total_usage.as_dict() if hasattr(outcome, "total_usage") else {},
+                        duration=duration,
+                        error=message,
+                    )
+                    await self._publish(
+                        run_id,
+                        EventType.RUN_FAILED,
+                        message,
+                        level=LogLevel.ERROR,
+                    )
+                except Exception as inner_exc:
+                    logger.exception("partial_artifact_preservation_failed", extra={"run_id": run_id, "error": str(inner_exc)})
+                    await self._fail(run_id, message)
+            else:
+                await self._fail(run_id, message)
 
         finally:
             # The provider manager is process-wide and outlives this run: its
@@ -430,6 +550,7 @@ class RunOrchestrator:
         memory: SharedProjectMemory,
         report: dict[str, Any],
         package: Any,
+        outcome: Any = None,
     ) -> None:
         """Record every deliverable as an addressable, versioned artifact."""
         async with session_scope() as session:
@@ -486,15 +607,24 @@ class RunOrchestrator:
                     produced_by=AgentRole.SOLUTION_ARCHITECT,
                 )
 
-            if memory.database.required and memory.database.schema_sql:
-                await store(
-                    ArtifactKind.DATABASE,
-                    "SQL Schema",
-                    memory.workspace.read("database/schema.sql"),
-                    f"{len(memory.database.tables)} tables with constraints and indexes.",
-                    produced_by=AgentRole.DATABASE_ENGINEER,
-                    content_type="application/sql",
-                )
+            if memory.database.required and memory.tech_stack.database:
+                adapter = self._adapters.database(memory.tech_stack.database)
+                schema_path = f"database/{adapter.schema_filename}"
+                if schema_content := memory.workspace.read(schema_path):
+                    is_mongodb = adapter.key == "mongodb"
+                    object_count = (
+                        len(memory.database.collections)
+                        if is_mongodb
+                        else len(memory.database.tables)
+                    )
+                    await store(
+                        ArtifactKind.DATABASE,
+                        "MongoDB Schema" if is_mongodb else "SQL Schema",
+                        schema_content,
+                        f"{object_count} {'collections' if is_mongodb else 'tables'} with indexes.",
+                        produced_by=AgentRole.DATABASE_ENGINEER,
+                        content_type="application/javascript" if is_mongodb else "application/sql",
+                    )
 
             if memory.architecture.api_endpoints:
                 await store(
@@ -524,17 +654,34 @@ class RunOrchestrator:
             )
 
             if package is not None:
+                is_partial = (
+                    (outcome.failed if outcome else False)
+                    or not memory.release_eligible
+                    or package.filename.endswith("-partial.zip")
+                    or "partial" in package.filename
+                )
+                pkg_name = "project-partial.zip" if is_partial else f"{memory.project_slug}.zip"
+                desc = (
+                    f"Partial project: {package.file_count} files, {package.size_kb} KB. Release blocked."
+                    if is_partial
+                    else f"Complete project: {package.file_count} files, {package.size_kb} KB."
+                )
                 await store(
                     ArtifactKind.PACKAGE,
-                    f"{memory.project_slug}.zip",
+                    pkg_name,
                     None,
-                    f"Complete project: {package.file_count} files, {package.size_kb} KB.",
+                    desc,
                     produced_by=AgentRole.ARTIFACT_MANAGER,
                     content_type="application/zip",
                     storage_path=str(package.path),
                     size_bytes=package.size_bytes,
                     checksum=package.checksum,
-                    metadata={"file_count": package.file_count, "filename": package.filename},
+                    metadata={
+                        "file_count": package.file_count,
+                        "filename": pkg_name,
+                        "is_partial": is_partial,
+                        "release_eligible": not is_partial,
+                    },
                 )
 
         await self._publish(
@@ -662,6 +809,159 @@ class RunOrchestrator:
                 )
         except Exception:  # noqa: BLE001 - logging must never break a run
             logger.warning("event_persist_failed", extra={"run_id": run_id})
+
+    def _determine_failed_stage(
+        self, memory: SharedProjectMemory, outcome: Any
+    ) -> str:
+        if memory.final_qa_result and not memory.final_qa_result.passed:
+            return "Final QA"
+        val_runs = getattr(memory, "validation_runs", [])
+        if val_runs and not val_runs[-1].passed:
+            return "QA Validation"
+        reason = getattr(outcome, "failure_reason", "") or ""
+        r_lower = reason.lower()
+        if "budget" in r_lower:
+            return "Request Budget Exhaustion"
+        if "timeout" in r_lower:
+            return "LLM Timeout"
+        if "independent" in r_lower:
+            return "Independent ZIP Validation"
+        if "review" in r_lower:
+            return "Code Review Gate"
+        return "Validation / QA Gate"
+
+    def _create_partial_package(
+        self,
+        *,
+        run_id: str,
+        memory: SharedProjectMemory,
+        outcome: Any,
+        ctx: AgentContext | None = None,
+        failed_stage: str = "Validation",
+        failed_command: str = "None",
+        exit_code: int | str = "N/A",
+        val_run: Any = None,
+    ) -> Any:
+        """Deterministically create project-partial.zip preserving exact current workspace."""
+        if len(memory.workspace) == 0:
+            return None
+
+        counts = count_preserved_files(memory.workspace)
+        commands_passed: list[str] = []
+        commands_failed: list[str] = []
+        val_failures: list[dict[str, Any]] = []
+        failure_count = 0
+
+        if val_run is not None:
+            if hasattr(val_run, "commands"):
+                commands_passed = [c.command for c in val_run.commands if c.exit_code == 0]
+                commands_failed = [c.command for c in val_run.commands if c.exit_code != 0]
+            if hasattr(val_run, "failed_commands"):
+                failure_count = len(val_run.failed_commands)
+                val_failures = [
+                    {
+                        "command": c.command,
+                        "exit_code": c.exit_code,
+                        "stdout": c.stdout,
+                        "stderr": c.stderr,
+                    }
+                    for c in val_run.failed_commands
+                ]
+                if val_run.failed_commands:
+                    first_fail = val_run.failed_commands[0]
+                    if failed_command == "None":
+                        failed_command = first_fail.command
+                    if exit_code == "N/A":
+                        exit_code = first_fail.exit_code
+        elif memory.final_qa_result and not memory.final_qa_result.passed:
+            failures = memory.final_qa_result.failures or []
+            failure_count = len(failures)
+            val_failures = failures
+            commands_failed = [f.get("command", "") for f in failures if f.get("command")]
+            if failures:
+                first_f = failures[0]
+                if failed_command == "None":
+                    failed_command = first_f.get("command", "None")
+                if exit_code == "N/A":
+                    exit_code = first_f.get("exit_code", 1)
+        else:
+            val_runs = getattr(memory, "validation_runs", [])
+            if val_runs and not val_runs[-1].passed:
+                last_val = val_runs[-1]
+                failures = last_val.failures or []
+                failure_count = len(failures)
+                val_failures = failures
+                commands_failed = [f.get("command", "") for f in failures if f.get("command")]
+                if failures:
+                    first_f = failures[0]
+                    if failed_command == "None":
+                        failed_command = first_f.get("command", "None")
+                    if exit_code == "N/A":
+                        exit_code = first_f.get("exit_code", 1)
+
+        repair_cycles_count = len(memory.repair_cycles)
+        llm_requests_used = 0
+        llm_request_limit = 15
+
+        if ctx and hasattr(ctx, "llm") and hasattr(ctx.llm, "budget"):
+            llm_requests_used = getattr(ctx.llm.budget, "total_used", 0)
+            llm_request_limit = getattr(ctx.llm.budget, "hard_limit", 15)
+        elif hasattr(outcome, "total_usage"):
+            total_u = outcome.total_usage.as_dict() if hasattr(outcome.total_usage, "as_dict") else {}
+            llm_requests_used = total_u.get("total_requests", 0)
+
+        failure_signatures: list[str] = []
+        for rc in memory.repair_cycles:
+            if hasattr(rc, "failure_signature_before") and rc.failure_signature_before:
+                failure_signatures.append(rc.failure_signature_before)
+            if hasattr(rc, "failure_signature_after") and rc.failure_signature_after:
+                failure_signatures.append(rc.failure_signature_after)
+        failure_signatures = list(dict.fromkeys(failure_signatures))
+
+        models_used = [
+            "nvidia/nemotron-3-super-120b-a12b",
+            "google/gemini-2.5-flash",
+        ]
+
+        readme_content = build_generation_status_readme(
+            failed_stage=failed_stage,
+            failed_command=failed_command,
+            exit_code=exit_code,
+            failure_count=failure_count,
+            repair_cycles=repair_cycles_count,
+            llm_requests_used=llm_requests_used,
+            llm_request_limit=llm_request_limit,
+            frontend_files=counts["frontend"],
+            backend_files=counts["backend"],
+            database_files=counts["database"],
+        )
+
+        diagnostics = build_diagnostics(
+            generation_id=run_id,
+            failed_stage=failed_stage,
+            llm_requests_used=llm_requests_used,
+            llm_request_limit=llm_request_limit,
+            repair_cycles=repair_cycles_count,
+            files_generated=len(memory.workspace),
+            files_modified=sum(len(getattr(rc, "files_modified", [])) for rc in memory.repair_cycles),
+            commands_passed=commands_passed,
+            commands_failed=commands_failed,
+            failure_signatures=failure_signatures,
+            models_used=models_used,
+            validation_failures=val_failures,
+            agent_execution_log=[],
+        )
+
+        package = self._packager.write_partial(
+            memory.workspace,
+            run_id=run_id,
+            project_slug=memory.project_slug,
+            diagnostics=diagnostics,
+            readme_content=readme_content,
+            filename="project-partial.zip",
+        )
+        assert package.path.exists(), f"Partial package was not created at {package.path}"
+        return package
 
 
 # --- artifact rendering ---------------------------------------------------
@@ -829,6 +1129,62 @@ def _render_api_spec(memory: SharedProjectMemory) -> str:
                 f"{', '.join(str(c) for c in endpoint.get('status_codes', []))}",
                 "",
             ]
+    return "\n".join(lines)
+
+
+def _render_failure_report(memory: SharedProjectMemory, outcome: Any) -> str:
+    """Render a comprehensive failure report when a project fails validation or the release gate."""
+    lines = [
+        f"# Aegis Release Failure Report — {memory.project_name}",
+        "",
+        "## Release Gate Status: BLOCKED",
+        f"**Reason:** {outcome.failure_reason or 'Validation failures detected during final QA'}",
+        f"**Date:** {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        "",
+        "## 1. Original User Requirement",
+        "",
+        memory.idea,
+        "",
+        "## 2. Tech Stack",
+        f"- Frontend: {memory.tech_stack.frontend or 'none'}",
+        f"- Backend: {memory.tech_stack.backend or 'none'}",
+        f"- Database: {memory.tech_stack.database or 'none'}",
+        "",
+        "## 3. Final Validation Failures",
+        "",
+    ]
+    if memory.final_qa_result and memory.final_qa_result.failures:
+        for idx, f in enumerate(memory.final_qa_result.failures, 1):
+            lines.append(f"### Failure #{idx}: {f.get('command')}")
+            lines.append(f"- **Category:** {f.get('category')}")
+            lines.append(f"- **File:** `{f.get('file', 'N/A')}`:{f.get('line', 'N/A')}")
+            lines.append(f"- **Responsible Agent:** `{f.get('responsible_agent', 'N/A')}`")
+            lines.append(f"- **Error details:**\n```\n{f.get('error', 'N/A')}\n```\n")
+    else:
+        lines.append("No specific compiler failure details recorded.\n")
+
+    lines += [
+        "## 4. Repair History",
+        f"Total repair cycles attempted: {len(memory.repair_cycles)}",
+        "",
+    ]
+    for c in memory.repair_cycles:
+        lines.append(
+            f"- Cycle {c.cycle_number}: {c.failures_found} failures found, "
+            f"modified {len(c.files_modified)} file(s), "
+            f"passed={c.validation_passed_after}"
+        )
+
+    lines += [
+        "",
+        "## 5. Recommended Manual Actions",
+        "- Review the error details above in the affected source files.",
+        "- Verify that all dependencies in package.json / requirements.txt match the imports used.",
+        "- Run the failing command locally in your terminal to inspect full verbose logs.",
+        "",
+        "---",
+        "*Report generated automatically by Aegis AI Release Gate.*",
+    ]
     return "\n".join(lines)
 
 

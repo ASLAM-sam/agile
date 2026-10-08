@@ -80,6 +80,8 @@ _FRONTEND_SIGNALS: dict[str, list[tuple[str, float, str]]] = {
         ("form", 1.5, "Reactive forms handle complex data entry well"),
     ],
     "react": [
+        ("react", 5.0, "Direct match for React requirement"),
+        ("typescript", 3.0, "TypeScript pairs naturally with React component architecture"),
         ("dashboard", 2.5, "Component model suits data-dense interactive dashboards"),
         ("admin", 2.0, "Rich admin panels benefit from the large component ecosystem"),
         ("realtime", 2.0, "Client-side interactivity is React's strength"),
@@ -141,7 +143,7 @@ class RecommendationService:
             if analysis.needs_backend
             else []
         )
-        database = self._rank_database(analysis) if analysis.needs_database else []
+        database = self._rank_database(analysis, corpus) if analysis.needs_database else []
 
         selected_backend = backend[0].key if backend else None
         selected_database = database[0].key if database else None
@@ -260,7 +262,7 @@ class RecommendationService:
 
         return score, reasons
 
-    def _rank_database(self, analysis: RequirementAnalysis) -> list[ScoredOption]:
+    def _rank_database(self, analysis: RequirementAnalysis, corpus: str) -> list[ScoredOption]:
         scored: list[ScoredOption] = []
         table_estimate = max(len(analysis.entities), 1)
         heavy = analysis.complexity in {
@@ -272,29 +274,26 @@ class RecommendationService:
             score = 5.0
             reasons: list[str] = []
 
-            if adapter.key == "postgresql":
-                score += 3.0
-                reasons.append(
-                    "Strongest correctness guarantees, rich indexing and JSONB support"
+            if adapter.key == "mongodb":
+                score += 2.0
+                reasons.append("Document collections support flexible, evolving application data")
+                document_signals = (
+                    "content", "catalog", "inventory", "event", "feed", "chat", "nested",
+                    "document", "flexible", "social", "realtime", "real-time",
                 )
+                if any(signal in corpus for signal in document_signals):
+                    score += 2.0
+                    reasons.append("The requirements include document-oriented or evolving data")
                 if heavy or table_estimate > 6:
-                    score += 1.5
-                    reasons.append("Handles complex relational models without strain")
-                if analysis.needs_authentication:
-                    score += 0.5
-                    reasons.append("Robust constraint support suits user and permission data")
-
-            elif adapter.key == "mysql":
-                score += 1.5
-                reasons.append("Broad hosting availability and a large operational ecosystem")
-                if not heavy:
-                    score += 0.5
-                    reasons.append("Well suited to read-heavy applications of this size")
-
+                    score += 1.0
+                    reasons.append("A managed document service suits the expected scale and concurrency")
             else:  # sqlite
                 if analysis.complexity == ProjectComplexity.MINIMAL and table_estimate <= 5:
                     score += 2.5
                     reasons.append("Zero-configuration and file-backed — right size for this scope")
+                elif any(signal in corpus for signal in ("prototype", "mvp", "single-user", "internal tool")):
+                    score += 1.5
+                    reasons.append("An embedded database keeps this small deployment simple")
                 else:
                     score -= 2.0
                     reasons.append(

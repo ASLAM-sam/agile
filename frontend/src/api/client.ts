@@ -287,7 +287,10 @@ function parseFrame(raw: string): SseFrame | null {
 /** Triggers a browser download for an authenticated endpoint. */
 export async function downloadFile(path: string, fallbackName: string): Promise<void> {
   const token = tokenStore.access;
-  const response = await fetch(`${BASE_URL}${path}`, {
+  const targetUrl = path.startsWith('http://') || path.startsWith('https://')
+    ? path
+    : (path.startsWith('/api/') ? path : `${BASE_URL}${path}`);
+  const response = await fetch(targetUrl, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
 

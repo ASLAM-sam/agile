@@ -116,6 +116,20 @@ export function useRunStream(runId: string | undefined): RunStreamState {
           });
 
           applyEvent(event, setAgents, setRun);
+
+          if (
+            event.type === 'artifact.created' ||
+            event.type === 'run.completed' ||
+            event.type === 'run.failed'
+          ) {
+            runApi
+              .get(runId)
+              .then((result) => {
+                setRun(result);
+                setAgents(result.agents ?? []);
+              })
+              .catch(() => {});
+          }
         }
 
         // The generator completed without a stream.end frame: the server

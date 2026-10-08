@@ -1,44 +1,52 @@
-"""Response models for the provider dashboard."""
+"""Response models for the provider dashboard.
+
+Updated for the role-based provider architecture (Phase 2).
+The schema is deliberately loose to accommodate the simplified manager.
+"""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ProviderHealthResponse(BaseModel):
-    """Live health for one model provider."""
+    """Live health for one model provider slot."""
 
-    key: str = Field(description="Stable provider identifier.")
-    display_name: str
-    model: str = Field(description="Model this provider is configured to use.")
-    priority: int = Field(description="Position in the routing order; lower is tried first.")
-    status: str = Field(description="healthy | degraded | cooling_down | unconfigured | disabled")
-    enabled: bool
-    configured: bool
-    selectable: bool = Field(description="Whether routing may choose it right now.")
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    requests: int
-    successes: int
-    failures: int
-    retries: int
-    failovers_from: int = Field(description="Times work was handed away from this provider.")
-    failovers_to: int = Field(description="Times this provider picked up another's work.")
-    success_rate: float
-    consecutive_failures: int
+    slot: str = Field(default="", description="Provider slot identifier (groq, gemini_frontend, etc.)")
+    # Keep 'key' as an alias for backwards compatibility with the frontend
+    key: str = Field(default="", description="Alias for slot, for API compatibility.")
+    display_name: str = Field(default="", description="Human-readable slot name.")
+    role_group: str = Field(default="", description="Roles assigned to this account.")
+    model: str = Field(description="Model this slot is configured to use.")
+    configured: bool = Field(description="Whether this slot has credentials.")
+    selectable: bool = Field(description="Whether this slot can serve requests.")
 
-    latency_ms: float = Field(description="Smoothed average round trip.")
-    last_latency_ms: float
+    requests: int = 0
+    successes: int = 0
+    failures: int = 0
+    rate_limits: int = 0
+    retries: int = 0
+    success_rate: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
-    last_error: str
-    last_error_kind: str
-    last_success_at: str | None
-    last_failure_at: str | None
-
-    cooldown_remaining_seconds: float
-    cooldown_reason: str
-
-    input_tokens: int
-    output_tokens: int
+    # Legacy fields kept for frontend compatibility (always 0 in role-based mode)
+    priority: int = Field(default=0, description="Not used in role-based routing.")
+    status: str = Field(default="healthy", description="Slot health status.")
+    enabled: bool = Field(default=True)
+    failovers_from: int = Field(default=0, description="Always 0 in role-based routing.")
+    failovers_to: int = Field(default=0, description="Always 0 in role-based routing.")
+    consecutive_failures: int = Field(default=0)
+    latency_ms: float = Field(default=0.0)
+    last_latency_ms: float = Field(default=0.0)
+    last_error: str = Field(default="")
+    last_error_kind: str = Field(default="")
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
+    cooldown_remaining_seconds: float = Field(default=0.0)
+    cooldown_reason: str = Field(default="")
 
 
 class CacheStatsResponse(BaseModel):
@@ -55,20 +63,24 @@ class CacheStatsResponse(BaseModel):
 class ProviderTotalsResponse(BaseModel):
     """Aggregate counters across every provider."""
 
+    model_config = ConfigDict(extra="ignore")
+
     requests: int
     successes: int
     failures: int
-    retries: int
-    failovers: int
+    retries: int = 0
+    failovers: int = 0
     cache_hits: int
     cache_misses: int
     cache_hit_rate: float
     success_rate: float
-    active_provider: str
+    active_provider: str = ""
 
 
 class ProviderDashboardResponse(BaseModel):
     """Everything the provider monitor renders, in one payload."""
+
+    model_config = ConfigDict(extra="ignore")
 
     providers: list[ProviderHealthResponse]
     totals: ProviderTotalsResponse

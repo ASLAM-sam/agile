@@ -70,7 +70,10 @@ class AdapterRegistry:
         return adapter
 
     def list_kind(self, kind: AdapterKind) -> list[TechnologyAdapter]:
-        return sorted(self._adapters[kind].values(), key=lambda a: a.display_name)
+        return sorted(
+            self._adapters[kind].values(),
+            key=lambda adapter: (getattr(adapter, "catalogue_priority", 100), adapter.display_name),
+        )
 
     def catalogue(self) -> dict[str, list[AdapterDescriptor]]:
         """Full catalogue grouped by kind, for the stack-selection screen."""
@@ -91,23 +94,23 @@ def build_default_registry() -> AdapterRegistry:
     from app.adapters.backend.express import ExpressAdapter
     from app.adapters.backend.fastapi_adapter import FastAPIAdapter
     from app.adapters.backend.spring_boot import SpringBootAdapter
-    from app.adapters.database.mysql import MySQLAdapter
-    from app.adapters.database.postgres import PostgresAdapter
+    from app.adapters.database.mongo import MongoDBAdapter
     from app.adapters.database.sqlite import SQLiteAdapter
     from app.adapters.frontend.angular import AngularAdapter
+    from app.adapters.frontend.html_css_js import HTMLCssJsAdapter
     from app.adapters.frontend.nextjs import NextJSAdapter
     from app.adapters.frontend.react import ReactAdapter
 
     registry = AdapterRegistry()
     for adapter in (
+        HTMLCssJsAdapter(),
         ReactAdapter(),
         NextJSAdapter(),
         AngularAdapter(),
         FastAPIAdapter(),
         ExpressAdapter(),
         SpringBootAdapter(),
-        PostgresAdapter(),
-        MySQLAdapter(),
+        MongoDBAdapter(),
         SQLiteAdapter(),
     ):
         registry.register(adapter)

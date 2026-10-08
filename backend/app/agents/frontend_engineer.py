@@ -9,7 +9,66 @@ from __future__ import annotations
 from app.agents.base import CodeAgent
 from app.agents.context import AgentContext
 from app.agents.results import AgentResult, SkipDecision
-from app.core.enums import AgentRole, ArtifactKind
+from app.core.enums import AdapterKind, AgentRole, ArtifactKind
+from app.llm.types import TokenUsage
+from app.packaging.workspace import normalise_path
+from app.workflow.memory import SharedProjectMemory
+
+
+DEPENDENCY_SAFETY_RULES = """\
+DEPENDENCY SAFETY RULES
+
+Only import packages that are present in the provided package.json.
+
+Do not invent npm packages.
+
+Do not assume a package is installed because it is commonly used.
+
+If a required capability needs a package that is not installed:
+
+1. Prefer implementing the feature using existing dependencies or browser/platform APIs.
+2. Only request a dependency addition when it is genuinely necessary.
+3. Never silently import an unavailable package."""
+
+TYPESCRIPT_SAFETY_RULES = """\
+TYPESCRIPT SAFETY RULES
+
+The provided tsconfig files are authoritative.
+
+Generate code that compiles under the exact TypeScript configuration provided.
+
+Do not weaken tsconfig settings to make code compile.
+
+Do not introduce implicit any.
+
+Do not create unused variables/imports when noUnusedLocals or similar checks are enabled.
+
+Do not use APIs or syntax incompatible with the configured target/module settings."""
+
+SCAFFOLDED_FILES_RULES = """\
+SCAFFOLDED FILES
+
+The following files are controlled by the project scaffold:
+
+- package.json
+- tsconfig.json
+- tsconfig.node.json
+- vite.config.ts
+- index.html
+
+Do NOT overwrite these files during normal frontend implementation unless the architecture explicitly requires a change.
+
+Application source files should be generated separately."""
+
+PROTECTED_SCAFFOLD_FILES = frozenset({
+    "frontend/package.json",
+    "frontend/tsconfig.json",
+    "frontend/tsconfig.app.json",
+    "frontend/tsconfig.node.json",
+    "frontend/vite.config.ts",
+    "frontend/vite.config.js",
+    "frontend/index.html",
+})
 
 
 class FrontendEngineerAgent(CodeAgent):
@@ -91,7 +150,12 @@ otherwise paste the same block of markup into a second file, extract it first.""
 
     async def execute(self, ctx: AgentContext) -> AgentResult:
         memory = ctx.memory
-        adapter = ctx.registry.frontend(memory.tech_stack.frontend or "react")
+        target_frontend = memory.tech_stack.frontend
+        if not target_frontend:
+            from app.core.config import settings
+            default_stack = getattr(settings, "default_frontend_stack", "html_css_js")
+            target_frontend = default_stack if ctx.registry.has(AdapterKind.FRONTEND, default_stack) else "react"
+        adapter = ctx.registry.frontend(target_frontend)
         scaffold_ctx = ctx.scaffold_context()
 
         await ctx.progress(self.role, 5, f"Preparing the {adapter.display_name} scaffold")
@@ -110,19 +174,66 @@ otherwise paste the same block of markup into a second file, extract it first.""
             f"({adapter.display_name} {adapter.version})",
         )
 
+        # 1. Read actual project configuration files directly from workspace after scaffolding
+        config_context = self.build_configuration_context(memory)
+
         conventions = adapter.conventions(scaffold_ctx)
         api_context = self._api_context(ctx)
         screens = self._screen_guidance(ctx)
 
         await ctx.progress(self.role, 15, "Planning pages, components and routes")
 
-        planned, plan_usage = await self.plan_files(
-            ctx,
-            instruction=(
-                "Plan every source file for the frontend application.\n\n"
-                f"{conventions}\n\n"
-                f"{api_context}\n\n"
-                f"{screens}\n\n"
+        user_req = memory.idea or memory.user_prompt or memory.analysis.project_overview
+        if adapter.key == "html_css_js":
+            planned = [
+                {
+                    "path": "frontend/index.html",
+                    "purpose": "Complete semantic HTML5 application structure with all required sections, navigation, interactive controls, and clean markup.",
+                    "priority": 1,
+                },
+                {
+                    "path": "frontend/css/styles.css",
+                    "purpose": "Comprehensive modern responsive CSS styling with variables, card layouts, animations, and mobile/tablet media queries.",
+                    "priority": 2,
+                },
+                {
+                    "path": "frontend/js/app.js",
+                    "purpose": "Complete interactive JavaScript application logic, navigation toggling, animations, and state handling.",
+                    "priority": 3,
+                },
+            ]
+            arch_folder = str(memory.architecture.folder_structure or "")
+            arch_modules = [m.get("name", "").lower() for m in (memory.architecture.modules or [])]
+            if "tasks.js" in arch_folder or any("task" in m for m in arch_modules):
+                planned.append({
+                    "path": "frontend/js/tasks.js",
+                    "purpose": "Task data operations, validation, filtering, and statistical metrics.",
+                    "priority": 4,
+                })
+            plan_usage = TokenUsage()
+            await ctx.log(self.role, f"Planned {len(planned)} frontend source files deterministically")
+        elif adapter.key == "react" and (not memory.needs_backend or "portfolio" in str(user_req).lower()):
+            planned = [
+                {
+                    "path": "frontend/src/index.css",
+                    "purpose": "Tailwind directives and modern responsive design system styling tokens.",
+                    "priority": 1,
+                },
+                {
+                    "path": "frontend/src/App.tsx",
+                    "purpose": "Complete production React + TypeScript component hierarchy implementing all requested sections.",
+                    "priority": 2,
+                },
+                {
+                    "path": "frontend/src/main.tsx",
+                    "purpose": "Root application render mounting <App /> in StrictMode into DOM root.",
+                    "priority": 3,
+                },
+            ]
+            plan_usage = TokenUsage()
+            await ctx.log(self.role, f"Planned {len(planned)} React source files deterministically")
+        else:
+            plan_rules = (
                 "Planning rules:\n"
                 "- Every path starts with `frontend/`.\n"
                 "- Do NOT plan any file the scaffold already provides (listed in "
@@ -135,22 +246,84 @@ otherwise paste the same block of markup into a second file, extract it first.""
                 "- Set `priority` so shared primitives and types come before the "
                 "pages that import them.\n"
                 "- Aim for 15–35 files."
-            ),
-        )
+            )
 
-        await ctx.log(self.role, f"Planned {len(planned)} frontend source files")
+            planned, plan_usage = await self.plan_files(
+                ctx,
+                instruction=(
+                    f"PROJECT REQUIREMENTS:\n{user_req}\n\n"
+                    "Plan every source file for the frontend application.\n\n"
+                    f"{conventions}\n\n"
+                    f"{api_context}\n\n"
+                    f"{screens}\n\n"
+                    f"{plan_rules}"
+                ),
+            )
+            await ctx.log(self.role, f"Planned {len(planned)} frontend source files")
+
+        batch_size = len(planned) if adapter.key in ("html_css_js", "react") else None
+        html_rules = ""
+        if adapter.key == "html_css_js":
+            arch_summary = memory.architecture.overview or ""
+            html_rules = (
+                f"\n\nPROJECT REQUIREMENTS:\n{user_req}\n"
+                f"{f'ARCHITECTURE OVERVIEW: {arch_summary}' if arch_summary else ''}\n\n"
+                "COMPLETE SINGLE-PASS IMPLEMENTATION REQUIREMENTS:\n"
+                "- Produce the COMPLETE, fully-implemented, production-ready frontend in this single response.\n"
+                "- In `frontend/index.html`: implement complete semantic HTML structure matching all user requirements, "
+                "with full navigation, all content sections (hero, about, skills, projects, experience, contact, etc.), "
+                "forms, and footer.\n"
+                "- In `frontend/css/styles.css`: implement complete, beautiful modern responsive CSS styling with :root variables, "
+                "cards, smooth transitions, hover effects, flexbox/grid layouts, and responsive breakpoints.\n"
+                "- In `frontend/js/app.js`: implement complete interactive logic, mobile menu toggling, smooth scrolling, "
+                "active link highlighting, form submission handling, and animations.\n"
+                "- Do NOT write placeholders or comments like '// Add remaining code here'. Write the full code.\n"
+            )
+        elif adapter.key == "react":
+            arch_summary = memory.architecture.overview or ""
+            html_rules = (
+                f"\n\nPROJECT REQUIREMENTS:\n{user_req}\n"
+                f"{f'ARCHITECTURE OVERVIEW: {arch_summary}' if arch_summary else ''}\n\n"
+                "COMPLETE SINGLE-PASS REACT IMPLEMENTATION REQUIREMENTS:\n"
+                "- Produce the COMPLETE, fully-implemented, production-ready React 18 + TypeScript frontend.\n"
+                "- In `frontend/src/index.css`: implement Tailwind directives and global styles.\n"
+                "- In `frontend/src/App.tsx`: implement complete React component hierarchy matching all user requirements, "
+                "with full navigation, mobile menu, all content sections (hero, about, skills, projects, experience, education, services, contact), "
+                "animations, project cards, social links, CV download button, and footer.\n"
+                "- In `frontend/src/main.tsx`: import React, ReactDOM from 'react-dom/client', App from './App', and './index.css', "
+                "mounting <App /> in StrictMode into document.getElementById('root')!.\n"
+                "- Do NOT write placeholders or comments like '// Add remaining code here'. Write the full code.\n"
+            )
+
+        # Determine protected scaffold files
+        scaffold_paths = {normalise_path(f.path) for f in scaffold_files}
+        planned_paths = {normalise_path(str(p.get("path", ""))) for p in planned}
+        protected_paths = (PROTECTED_SCAFFOLD_FILES | scaffold_paths) - planned_paths
+
+        instruction_parts = [
+            DEPENDENCY_SAFETY_RULES,
+            TYPESCRIPT_SAFETY_RULES,
+            SCAFFOLDED_FILES_RULES,
+            conventions,
+            api_context,
+            (
+                "Every component must render loading, error and empty states where "
+                "it loads data. Every interactive element must be keyboard accessible."
+            ),
+        ]
+        if html_rules:
+            instruction_parts.append(html_rules)
+        extra_instruction = "\n\n".join(part for part in instruction_parts if part)
 
         written, gen_usage, warnings = await self.generate_files(
             ctx,
             planned,
+            batch_size=batch_size,
             progress_from=20,
             progress_to=95,
-            extra_instruction=(
-                f"{conventions}\n\n{api_context}\n\n"
-                "Every component must render loading, error and empty states where "
-                "it loads data. Every interactive element must be keyboard "
-                "accessible with a visible focus ring."
-            ),
+            config_context=config_context,
+            extra_instruction=extra_instruction,
+            protected_paths=protected_paths,
         )
 
         total_usage = plan_usage + gen_usage
@@ -181,6 +354,33 @@ otherwise paste the same block of markup into a second file, extract it first.""
             files_produced=total_files,
             confidence=confidence,
             warnings=warnings,
+        )
+
+    @classmethod
+    def build_configuration_context(cls, memory: SharedProjectMemory) -> str:
+        """Retrieve actual scaffold configuration files directly from the workspace."""
+        candidate_paths = [
+            "frontend/package.json",
+            "frontend/tsconfig.json",
+            "frontend/tsconfig.app.json",
+            "frontend/tsconfig.node.json",
+            "frontend/vite.config.ts",
+            "frontend/index.html",
+        ]
+        file_blocks: list[str] = []
+        for path in candidate_paths:
+            content = memory.workspace.read(path)
+            if content is not None:
+                file_blocks.append(f"=== {path} ===\n{content.strip()}")
+
+        if not file_blocks:
+            return ""
+
+        return (
+            "PROJECT CONFIGURATION CONTEXT\n\n"
+            "The following files already exist in the project.\n\n"
+            "You MUST treat them as authoritative.\n\n"
+            + "\n\n".join(file_blocks)
         )
 
     @staticmethod

@@ -20,11 +20,10 @@ class FastAPIAdapter(BackendAdapter):
         "Teams working in Python",
         "APIs where a generated OpenAPI contract matters",
     )
-    supported_databases = ("postgresql", "mysql", "sqlite")
+    supported_databases = ("mongodb", "sqlite")
 
     _DRIVERS = {
-        "postgresql": ("asyncpg", "postgresql+asyncpg"),
-        "mysql": ("aiomysql", "mysql+aiomysql"),
+        "mongodb": ("pymongo", "mongodb"),
         "sqlite": ("aiosqlite", "sqlite+aiosqlite"),
     }
 
@@ -38,7 +37,9 @@ class FastAPIAdapter(BackendAdapter):
         db_deps = ""
         if ctx.needs_database:
             db_deps = (
-                f'    "sqlalchemy[asyncio]>=2.0.36",\n'
+                '    "pymongo>=4.10.0",\n'
+                if ctx.database_key == "mongodb"
+                else f'    "sqlalchemy[asyncio]>=2.0.36",\n'
                 f'    "{package}>=0.20.0",\n'
                 f'    "alembic>=1.14.0",\n'
                 f'    "greenlet>=3.1.0",\n'
@@ -147,7 +148,9 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM"]
             "pydantic-settings>=2.6.0",
             "python-multipart>=0.0.17",
         ]
-        if ctx.needs_database:
+        if ctx.needs_database and ctx.database_key == "mongodb":
+            lines += ["pymongo>=4.10.0"]
+        elif ctx.needs_database:
             lines += [
                 "sqlalchemy[asyncio]>=2.0.36",
                 f"{driver}>=0.20.0",
@@ -159,13 +162,11 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM"]
         return "\n".join(lines) + "\n"
 
     def _database_url(self, ctx: ScaffoldContext, dialect: str) -> str:
+        if ctx.database_key == "mongodb":
+            return f"mongodb://localhost:27017/{ctx.package_name}"
         if ctx.database_key == "sqlite":
             return f"{dialect}:///./{ctx.package_name}.db"
-        port = "5432" if ctx.database_key == "postgresql" else "3306"
-        return (
-            f"{dialect}://{ctx.package_name}:{ctx.package_name}_password"
-            f"@localhost:{port}/{ctx.package_name}"
-        )
+        return f"{dialect}:///./{ctx.package_name}.db"
 
     def env_template(self, ctx: ScaffoldContext, database_url: str) -> str:
         lines = [
@@ -242,10 +243,8 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "{ctx.api_port}"]
         ]
         if ctx.needs_database:
             sections += [
-                "  models/<res>.py         SQLAlchemy 2.0 ORM models",
-                "  repositories/<res>_repository.py  All SQL lives here",
-                "  db/session.py           Async engine + get_session dependency",
-                "  db/base.py              DeclarativeBase",
+                "  repositories/<res>_repository.py  All persistence access lives here",
+                "  db/                     Database client lifecycle and dependencies",
             ]
         if ctx.needs_auth:
             sections.append("  core/security.py        Password hashing + JWT encode/decode")
@@ -255,8 +254,8 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "{ctx.api_port}"]
             "## Non-negotiable rules",
             "1. Layering is strict: routes -> services -> repositories. A route never "
             "writes SQL; a service never imports `fastapi`.",
-            "2. Use SQLAlchemy 2.0 typed mappings (`Mapped[...]`, `mapped_column(...)`). "
-            "Never the legacy `Column(...)` declarative style.",
+            "2. Keep persistence details inside repositories; routes and services never "
+            "construct a database client or issue queries directly.",
             "3. All I/O is `async def`. Database calls are awaited.",
             "4. Dependencies are injected with `Depends(...)`, never constructed inline "
             "inside a handler.",
@@ -269,7 +268,20 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "{ctx.api_port}"]
             "9. Every module and public function carries a concise docstring.",
             "10. Full type annotations on every signature.",
         ]
-        if ctx.needs_database:
+        if ctx.needs_database and ctx.database_key == "mongodb":
+            sections += [
+                "",
+                "## Database — MongoDB",
+                "- Use `pymongo.AsyncMongoClient` with `DATABASE_URL`; create it during "
+                "the FastAPI lifespan and close it on shutdown.",
+                "- Repositories receive an `AsyncDatabase` or typed collection dependency; "
+                "all driver calls are awaited.",
+                "- Use MongoDB document operations and aggregation pipelines, never SQL or "
+                "SQLAlchemy.",
+                "- Documents, collection names and indexes must match the generated "
+                "`database/schema.js` validators exactly.",
+            ]
+        elif ctx.needs_database:
             sections += [
                 "",
                 "## Database",

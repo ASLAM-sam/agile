@@ -100,7 +100,7 @@ class TestRecommendations:
         )
         assert result.stack.frontend == "nextjs"
 
-    def test_postgres_is_preferred_for_substantial_projects(
+    def test_mongodb_is_preferred_for_substantial_projects(
         self, service: RecommendationService
     ) -> None:
         result = service.recommend(
@@ -110,7 +110,7 @@ class TestRecommendations:
                 entities=["Patient", "Doctor", "Appointment", "Ward", "Prescription"],
             ),
         )
-        assert result.stack.database == "postgresql"
+        assert result.stack.database == "mongodb"
 
     def test_recommendation_is_deterministic(self, service: RecommendationService) -> None:
         """The same input must always produce the same recommendation."""
@@ -137,7 +137,7 @@ class TestStackValidation:
     def test_accepts_a_valid_stack(self, adapters: AdapterRegistry) -> None:
         problems = validate_stack(
             adapters,
-            TechStack(frontend="react", backend="fastapi", database="postgresql"),
+            TechStack(frontend="react", backend="fastapi", database="mongodb"),
             analysis(),
         )
         assert problems == []
@@ -145,7 +145,7 @@ class TestStackValidation:
     def test_reports_unknown_technology(self, adapters: AdapterRegistry) -> None:
         problems = validate_stack(
             adapters,
-            TechStack(frontend="svelte", backend="fastapi", database="postgresql"),
+            TechStack(frontend="svelte", backend="fastapi", database="mongodb"),
             analysis(),
         )
         assert any("svelte" in problem for problem in problems)
@@ -153,15 +153,15 @@ class TestStackValidation:
     def test_reports_missing_required_layer(self, adapters: AdapterRegistry) -> None:
         problems = validate_stack(
             adapters,
-            TechStack(frontend="react", backend=None, database="postgresql"),
+            TechStack(frontend="react", backend=None, database="mongodb"),
             analysis(),
         )
         assert any("backend" in problem.lower() for problem in problems)
 
-    def test_reports_incompatible_database(self, adapters: AdapterRegistry) -> None:
+    def test_reports_removed_database(self, adapters: AdapterRegistry) -> None:
         problems = validate_stack(
             adapters,
-            TechStack(frontend="react", backend="fastapi", database="mongodb"),
+            TechStack(frontend="react", backend="fastapi", database="postgresql"),
             analysis(),
         )
-        assert problems, "an unknown database must be rejected"
+        assert any("Unknown database" in problem for problem in problems)

@@ -132,6 +132,7 @@ class WorkflowEngine:
             if decision.skipped:
                 step.status = AgentStatus.SKIPPED
                 step.skip_reason = decision.reason
+                ctx.memory.record_agent_status(step.role, AgentStatus.SKIPPED)
                 step_outcome = StepOutcome(
                     role=step.role,
                     status=AgentStatus.SKIPPED,
@@ -148,11 +149,12 @@ class WorkflowEngine:
             # A dependency that failed leaves this agent without its input.
             blocker = self._blocked_by(step, outcome)
             if blocker is not None:
-                reason = f"Skipped because {blocker} did not complete."
-                step.status = AgentStatus.SKIPPED
+                reason = f"Blocked because {blocker} did not complete."
+                step.status = AgentStatus.BLOCKED
                 step.skip_reason = reason
+                ctx.memory.record_agent_status(step.role, AgentStatus.BLOCKED)
                 step_outcome = StepOutcome(
-                    role=step.role, status=AgentStatus.SKIPPED, skip_reason=reason
+                    role=step.role, status=AgentStatus.BLOCKED, skip_reason=reason
                 )
                 outcome.outcomes.append(step_outcome)
                 await self._notify_finished(step, step_outcome)
@@ -162,12 +164,23 @@ class WorkflowEngine:
             outcome.outcomes.append(step_outcome)
             outcome.total_usage = outcome.total_usage + step_outcome.usage
 
-            if step_outcome.status == AgentStatus.FAILED and step.role in CRITICAL_ROLES:
-                outcome.failed = True
-                outcome.failure_reason = (
-                    f"{agent.display_name} failed and is required: {step_outcome.error}"
-                )
-                break
+            if step_outcome.status == AgentStatus.FAILED:
+                if step.role in CRITICAL_ROLES:
+                    outcome.failed = True
+                    outcome.failure_reason = (
+                        f"{agent.display_name} failed and is required: {step_outcome.error}"
+                    )
+                    break
+                elif (
+                    (step.role == AgentRole.FRONTEND_ENGINEER and ctx.memory.needs_frontend)
+                    or (step.role == AgentRole.BACKEND_ENGINEER and ctx.memory.needs_backend)
+                    or (step.role == AgentRole.DATABASE_ENGINEER and ctx.memory.needs_database)
+                ):
+                    outcome.failed = True
+                    if not outcome.failure_reason:
+                        outcome.failure_reason = (
+                            f"{agent.display_name} failed: {step_outcome.error}"
+                        )
 
         outcome.duration_seconds = round(time.perf_counter() - started, 3)
         return outcome
@@ -189,6 +202,7 @@ class WorkflowEngine:
             self._validate_result(agent, result)
 
             step.status = AgentStatus.COMPLETED
+            ctx.memory.record_agent_status(step.role, AgentStatus.COMPLETED)
             step_outcome = StepOutcome(
                 role=step.role,
                 status=AgentStatus.COMPLETED,
@@ -208,6 +222,7 @@ class WorkflowEngine:
         except (AgentExecutionError, LLMError) as exc:
             duration = round(time.perf_counter() - started, 3)
             step.status = AgentStatus.FAILED
+            ctx.memory.record_agent_status(step.role, AgentStatus.FAILED, error=exc.message)
             step_outcome = StepOutcome(
                 role=step.role,
                 status=AgentStatus.FAILED,
@@ -224,6 +239,7 @@ class WorkflowEngine:
             duration = round(time.perf_counter() - started, 3)
             step.status = AgentStatus.FAILED
             message = f"{type(exc).__name__}: {exc}"
+            ctx.memory.record_agent_status(step.role, AgentStatus.FAILED, error=message)
             step_outcome = StepOutcome(
                 role=step.role,
                 status=AgentStatus.FAILED,

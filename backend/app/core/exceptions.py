@@ -73,6 +73,11 @@ class ConfigurationError(AegisError):
     log_traceback = False  # the message states the fix; a trace adds nothing
 
 
+class BudgetExceededError(AegisError):
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    error_code = "budget_exceeded"
+
+
 class LLMError(AegisError):
     """Raised when the language model provider fails irrecoverably."""
 
@@ -133,10 +138,17 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled_exception", extra={"path": request.url.path})
+        content: dict[str, Any] = {
+            "error": "internal_error",
+            "message": "An unexpected error occurred.",
+        }
+        try:
+            from app.core.config import settings
+            if settings.debug or settings.environment == "development":
+                content["details"] = {"reason": f"{type(exc).__name__}: {exc}"}
+        except Exception:
+            pass
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "error": "internal_error",
-                "message": "An unexpected error occurred.",
-            },
+            content=content,
         )

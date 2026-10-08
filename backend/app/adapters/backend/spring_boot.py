@@ -20,21 +20,9 @@ class SpringBootAdapter(BackendAdapter):
         "Complex transactional domains",
         "Teams with existing JVM infrastructure",
     )
-    supported_databases = ("postgresql", "mysql", "sqlite")
+    supported_databases = ("mongodb", "sqlite")
 
     _JDBC = {
-        "postgresql": {
-            "artifact": "org.postgresql:postgresql",
-            "scheme": "jdbc:postgresql://localhost:5432",
-            "driver": "org.postgresql.Driver",
-            "dialect": "org.hibernate.dialect.PostgreSQLDialect",
-        },
-        "mysql": {
-            "artifact": "com.mysql:mysql-connector-j",
-            "scheme": "jdbc:mysql://localhost:3306",
-            "driver": "com.mysql.cj.jdbc.Driver",
-            "dialect": "org.hibernate.dialect.MySQLDialect",
-        },
         "sqlite": {
             "artifact": "org.xerial:sqlite-jdbc:3.47.0.0",
             "scheme": "jdbc:sqlite:",
@@ -54,21 +42,19 @@ class SpringBootAdapter(BackendAdapter):
         return self._java_package(ctx).replace(".", "/")
 
     def scaffold(self, ctx: ScaffoldContext) -> list[ScaffoldFile]:
-        jdbc = self._JDBC.get(ctx.database_key or "postgresql", self._JDBC["postgresql"])
+        jdbc = self._JDBC.get(ctx.database_key or "sqlite", self._JDBC["sqlite"])
         package = self._java_package(ctx)
 
         db_deps = ""
-        if ctx.needs_database:
+        if ctx.needs_database and ctx.database_key == "mongodb":
+            db_deps = "    implementation 'org.springframework.boot:spring-boot-starter-data-mongodb'\n"
+        elif ctx.needs_database:
             db_deps = (
                 "    implementation 'org.springframework.boot:"
                 "spring-boot-starter-data-jpa'\n"
                 "    implementation 'org.flywaydb:flyway-core'\n"
                 f"    runtimeOnly '{jdbc['artifact']}'\n"
             )
-            if ctx.database_key == "postgresql":
-                db_deps += "    implementation 'org.flywaydb:flyway-database-postgresql'\n"
-            elif ctx.database_key == "mysql":
-                db_deps += "    implementation 'org.flywaydb:flyway-mysql'\n"
 
         auth_deps = ""
         if ctx.needs_auth:
@@ -148,9 +134,7 @@ tasks.named('bootJar') {{
             ScaffoldFile(
                 path="backend/.env.example",
                 description="Documented environment variables. Copy to `.env`.",
-                content=self.env_template(
-                    ctx, f"{jdbc['scheme']}/{ctx.package_name}" if ctx.needs_database else ""
-                ),
+                content=self.env_template(ctx, self._database_url(ctx, jdbc)),
             ),
             ScaffoldFile(
                 path=f"backend/src/main/java/{self._package_path(ctx)}/package-info.java",
@@ -165,7 +149,13 @@ tasks.named('bootJar') {{
             "  application:",
             f"    name: {ctx.project_slug}-api",
         ]
-        if ctx.needs_database:
+        if ctx.needs_database and ctx.database_key == "mongodb":
+            lines += [
+                "  data:",
+                "    mongodb:",
+                f"      uri: ${{MONGODB_URI:mongodb://localhost:27017/{ctx.package_name}}}",
+            ]
+        elif ctx.needs_database:
             url = f"{jdbc['scheme']}/{ctx.package_name}"
             if ctx.database_key == "sqlite":
                 url = f"jdbc:sqlite:{ctx.package_name}.db"
@@ -222,6 +212,15 @@ tasks.named('bootJar') {{
         ]
         return "\n".join(lines) + "\n"
 
+    def _database_url(self, ctx: ScaffoldContext, jdbc: dict[str, str]) -> str:
+        if not ctx.needs_database:
+            return ""
+        if ctx.database_key == "mongodb":
+            return f"mongodb://localhost:27017/{ctx.package_name}"
+        if ctx.database_key == "sqlite":
+            return f"jdbc:sqlite:{ctx.package_name}.db"
+        return f"{jdbc['scheme']}/{ctx.package_name}"
+
     def env_template(self, ctx: ScaffoldContext, database_url: str) -> str:
         lines = [
             "# Application",
@@ -231,7 +230,9 @@ tasks.named('bootJar') {{
             "# CORS — comma-separated origins allowed to call this API",
             f"CORS_ORIGINS=http://localhost:{ctx.web_port}",
         ]
-        if ctx.needs_database:
+        if ctx.needs_database and ctx.database_key == "mongodb":
+            lines += ["", "# Database", f"MONGODB_URI={database_url}"]
+        elif ctx.needs_database:
             lines += [
                 "",
                 "# Database",
@@ -291,10 +292,16 @@ ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "app.jar"]
             "  service/impl/<Res>ServiceImpl.java Business logic",
         ]
         if ctx.needs_database:
-            sections += [
-                "  repository/<Res>Repository.java    Spring Data JPA interface",
-                "  entity/<Res>.java                 JPA @Entity",
-            ]
+            if ctx.database_key == "mongodb":
+                sections += [
+                    "  repository/<Res>Repository.java    Spring Data MongoDB interface",
+                    "  document/<Res>.java               MongoDB @Document",
+                ]
+            else:
+                sections += [
+                    "  repository/<Res>Repository.java    Spring Data JPA interface",
+                    "  entity/<Res>.java                 JPA @Entity",
+                ]
         sections += [
             "  dto/<Res>Request.java         Request record with Jakarta validation",
             "  dto/<Res>Response.java        Response record",
@@ -313,8 +320,8 @@ ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "app.jar"]
             "",
             "## Non-negotiable rules",
             "1. Constructor injection only. Never `@Autowired` on a field.",
-            "2. DTOs are Java `record` types. Entities are classes.",
-            "3. Never expose a JPA entity from a controller — always map to a DTO.",
+            "2. DTOs are Java `record` types. Persistence models are classes.",
+            "3. Never expose a persistence model from a controller — always map to a DTO.",
             "4. Request DTOs carry Jakarta validation annotations "
             "(`@NotBlank`, `@Email`, `@Positive`); controllers annotate the body "
             "parameter with `@Valid`.",
@@ -328,7 +335,20 @@ ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "app.jar"]
             "not compile.",
             "10. Every public class and method carries a Javadoc comment.",
         ]
-        if ctx.needs_database:
+        if ctx.needs_database and ctx.database_key == "mongodb":
+            sections += [
+                "",
+                "## Database — MongoDB",
+                "- Use `spring.data.mongodb.uri` from `MONGODB_URI`; do not configure JDBC, "
+                "JPA, Hibernate, or Flyway.",
+                "- Document classes use `@Document(collection = \"...\")`; repositories extend "
+                "`MongoRepository<Document, String>` (or the matching identifier type).",
+                "- Use `MongoTemplate` only for explicit aggregation or update operations that "
+                "a repository method cannot express clearly.",
+                "- Collections, validators and indexes must match `database/schema.js`. Keep "
+                "MongoDB migration scripts in `database/migrations/` and run them with mongosh.",
+            ]
+        elif ctx.needs_database:
             sections += [
                 "",
                 "## Database",

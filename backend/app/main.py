@@ -8,9 +8,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
+from app.api.deps import CurrentUser, GenerationServiceDep, SessionDep
 from app.api.v1.router import api_router
+from app.api.v1.routes.artifacts import download_package
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
@@ -50,7 +52,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         extra={
             "version": settings.app_version,
             "environment": settings.environment,
-            "llm_provider": settings.llm_provider,
             "llm_model": settings.active_model,
             "llm_configured": settings.llm_configured,
         },
@@ -63,7 +64,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.warning(
             "llm_api_key_missing",
             extra={
-                "provider": settings.llm_provider,
                 "impact": (
                     "Generation is disabled until "
                     f"{settings.active_api_key_variable} is set."
@@ -123,6 +123,33 @@ def create_app() -> FastAPI:
 
     register_exception_handlers(app)
     app.include_router(api_router, prefix=settings.api_prefix)
+
+    @app.get(
+        "/api/generations/{generation_id}/artifact",
+        response_class=FileResponse,
+        include_in_schema=True,
+        tags=["Artifacts"],
+        summary="Download artifact by generation ID",
+    )
+    @app.get(
+        "/api/runs/{generation_id}/artifact",
+        response_class=FileResponse,
+        include_in_schema=False,
+    )
+    @app.get(
+        "/api/runs/{generation_id}/download",
+        response_class=FileResponse,
+        include_in_schema=False,
+    )
+    async def get_generation_artifact(
+        generation_id: str,
+        user: CurrentUser,
+        generation: GenerationServiceDep,
+        session: SessionDep,
+    ) -> FileResponse:
+        return await download_package(
+            run_id=generation_id, user=user, generation=generation, session=session
+        )
 
     @app.get("/", include_in_schema=False)
     async def root() -> JSONResponse:

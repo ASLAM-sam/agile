@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 
-import { ApiError } from '@/api/client';
+import { ApiError, downloadFile } from '@/api/client';
 import { runApi } from '@/api/resources';
 import { AgentMonitor } from '@/components/AgentMonitor';
 import { GenerationConsole } from '@/components/GenerationConsole';
 import { GenerationReportView } from '@/components/GenerationReport';
+import { GenerationResult } from '@/components/GenerationResult';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { RunStatusBadge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -30,7 +31,10 @@ export function RunDetailPage() {
     setDownloading(true);
     setDownloadError(null);
     try {
-      await runApi.download(runId, run?.project_name ?? 'project');
+      const isPartial = run?.status === 'failed' || run?.artifact?.type === 'partial' || run?.artifact_type === 'partial';
+      const fallbackName = run?.artifact?.name ?? run?.artifact_name ?? (isPartial ? 'project-partial.zip' : `${run?.project_name ?? 'project'}.zip`);
+      const downloadPath = run?.artifact?.download_url ?? run?.download_url ?? `/runs/${runId}/download`;
+      await runApi.download(runId, fallbackName, downloadPath);
     } catch (caught) {
       setDownloadError(
         caught instanceof ApiError ? caught.message : 'The download could not be completed.',
@@ -60,12 +64,20 @@ export function RunDetailPage() {
 
   if (!run) return <LoadingState rows={5} label="Loading run…" />;
 
-  const isActive = !isFinished;
+  const isPackaging = run.status === 'packaging' || run.phase === 'packaging';
+  const isActive = !isFinished && !isPackaging;
   const completedAgents = agents.filter(
     (a) => a.status === 'completed' || a.status === 'skipped' || a.status === 'failed',
   ).length;
   const overallProgress =
     agents.length > 0 ? (completedAgents / agents.length) * 100 : run.progress;
+  const hasPartialArtifact =
+    run.status === 'failed' && Boolean(
+      run.artifact?.available ??
+      run.artifact_available ??
+      (run.file_count && run.file_count > 0) ??
+      ((run.artifact_count ?? 0) > 0)
+    );
 
   const tabs: Array<{ id: Tab; label: string; disabled?: boolean }> = [
     { id: 'monitor', label: 'Live monitor' },
@@ -92,6 +104,11 @@ export function RunDetailPage() {
         ]}
         actions={
           <>
+            {isPackaging ? (
+              <span className="flex items-center gap-2 text-sm font-medium text-amber-300 animate-pulse">
+                Preparing artifact…
+              </span>
+            ) : null}
             {isActive ? (
               <Button variant="secondary" onClick={handleCancel}>
                 Cancel
@@ -100,6 +117,16 @@ export function RunDetailPage() {
             {run.status === 'completed' ? (
               <Button onClick={handleDownload} isLoading={isDownloading}>
                 Download ZIP
+              </Button>
+            ) : null}
+            {hasPartialArtifact ? (
+              <Button
+                variant="secondary"
+                onClick={handleDownload}
+                isLoading={isDownloading}
+                className="border-amber-500/40 text-amber-200 hover:bg-amber-800/30"
+              >
+                Download Partial ZIP
               </Button>
             ) : null}
           </>
@@ -115,14 +142,12 @@ export function RunDetailPage() {
         </div>
       ) : null}
 
-      {run.error_message ? (
-        <div
-          className="mb-5 rounded-lg border border-danger/30 bg-danger/10 px-4 py-3"
-          role="alert"
-        >
-          <p className="text-sm font-medium text-danger">Generation failed</p>
-          <p className="mt-1 text-xs text-danger/90">{run.error_message}</p>
-        </div>
+      {run.status === 'failed' ? (
+        <GenerationResult
+          run={run}
+          onDownload={handleDownload}
+          isDownloading={isDownloading}
+        />
       ) : null}
 
       {isActive ? (

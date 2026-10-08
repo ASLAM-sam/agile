@@ -183,10 +183,12 @@ class ProjectWorkspace:
         """Bulk write. Returns (accepted, rejected).
 
         A single malformed file must not abort a whole batch, so failures are
-        collected and reported rather than raised.
+        collected and reported rather than raised. Duplicate paths within a batch
+        are normalized and deduplicated deterministically at the source.
         """
         accepted: list[WorkspaceFile] = []
         rejected: list[dict[str, str]] = []
+        deduped_items: dict[str, dict[str, Any]] = {}
 
         for item in items:
             path = str(item.get("path", "")).strip()
@@ -201,17 +203,24 @@ class ProjectWorkspace:
                 rejected.append({"path": path, "reason": "content is empty"})
                 continue
             try:
+                norm_p = normalise_path(path)
+                deduped_items[norm_p] = item
+            except ValidationError as exc:
+                rejected.append({"path": path, "reason": exc.message})
+
+        for norm_path, item in deduped_items.items():
+            try:
                 accepted.append(
                     self.write(
-                        path,
-                        content,
+                        norm_path,
+                        str(item.get("content", "")),
                         description=str(item.get("description", "")),
                         produced_by=produced_by,
                         overwrite=overwrite,
                     )
                 )
             except ValidationError as exc:
-                rejected.append({"path": path, "reason": exc.message})
+                rejected.append({"path": norm_path, "reason": exc.message})
 
         self._rejections.extend(rejected)
         return accepted, rejected
@@ -251,6 +260,101 @@ class ProjectWorkspace:
     def matching(self, *extensions: str) -> list[WorkspaceFile]:
         wanted = {e if e.startswith(".") else f".{e}" for e in extensions}
         return [f for f in self.files if f.extension in wanted]
+
+    # --- snapshots & integrity -------------------------------------------
+
+    @property
+    def fingerprint(self) -> str:
+        """Deterministic fingerprint of all files and contents in workspace."""
+        hasher = hashlib.sha256()
+        for path in sorted(self._files.keys()):
+            f = self._files[path]
+            hasher.update(path.encode("utf-8"))
+            hasher.update(f.checksum.encode("utf-8"))
+        return hasher.hexdigest()
+
+    def create_snapshot(self) -> dict[str, WorkspaceFile]:
+        """Create an in-memory snapshot of current workspace files for rollback."""
+        return {
+            path: WorkspaceFile(
+                path=f.path,
+                content=f.content,
+                description=f.description,
+                produced_by=f.produced_by,
+                revision=f.revision,
+                created_at=f.created_at,
+                updated_at=f.updated_at,
+            )
+            for path, f in self._files.items()
+        }
+
+    def restore_snapshot(self, snapshot: dict[str, WorkspaceFile]) -> None:
+        """Restore workspace to a previously captured snapshot."""
+        self._files = {
+            path: WorkspaceFile(
+                path=f.path,
+                content=f.content,
+                description=f.description,
+                produced_by=f.produced_by,
+                revision=f.revision,
+                created_at=f.created_at,
+                updated_at=f.updated_at,
+            )
+            for path, f in snapshot.items()
+        }
+
+    @staticmethod
+    def is_path_allowed_for_role(role: AgentRole, path: str) -> bool:
+        """Check if an agent role is permitted to modify the given path."""
+        norm = path.replace("\\", "/").strip("/")
+        if role in {
+            AgentRole.MANAGER,
+            AgentRole.SOLUTION_ARCHITECT,
+            AgentRole.ARTIFACT_MANAGER,
+            AgentRole.IMPROVEMENT_ENGINEER,
+            AgentRole.REVIEW_ENGINEER,
+        }:
+            return True
+
+        if role is AgentRole.FRONTEND_ENGINEER:
+            return (
+                norm.startswith("frontend/")
+                or norm.startswith("public/")
+                or norm.startswith("src/")
+                or norm in {"index.html", "vite.config.ts", "package.json", "tsconfig.json"}
+            )
+
+        if role is AgentRole.BACKEND_ENGINEER:
+            return (
+                norm.startswith("backend/")
+                or norm.startswith("app/")
+                or norm.startswith("tests/")
+                or norm in {"requirements.txt", "pyproject.toml", "Dockerfile", "docker-compose.yml"}
+            )
+
+        if role is AgentRole.DATABASE_ENGINEER:
+            return (
+                "database" in norm
+                or "migration" in norm
+                or "alembic" in norm
+                or "schema" in norm
+                or "models" in norm
+            )
+
+        if role is AgentRole.QA_ENGINEER:
+            return (
+                "test" in norm
+                or "spec" in norm
+                or norm.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx", "_test.py"))
+            )
+
+        if role is AgentRole.DOCUMENTATION_ENGINEER:
+            return (
+                norm.endswith((".md", ".txt"))
+                or norm.startswith("docs/")
+            )
+
+        return True
 
     # --- statistics ------------------------------------------------------
 

@@ -9,6 +9,7 @@ from app.models.artifact import Artifact
 from app.models.project import Project
 from app.models.run import GenerationRun
 from app.models.run_event import RunEvent
+from app.models.usage_log import UsageLog
 from app.models.user import User
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "GenerationRun",
     "Project",
     "RunEvent",
+    "UsageLog",
     "User",
 ]

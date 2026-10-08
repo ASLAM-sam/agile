@@ -201,6 +201,20 @@ export interface Run {
   input_tokens?: number;
   output_tokens?: number;
   cached_tokens?: number;
+  release_eligible?: boolean;
+  artifact?: {
+    available: boolean;
+    type: 'full' | 'partial';
+    name: string;
+    download_url?: string;
+    artifact_available?: boolean;
+    artifact_type?: string;
+    artifact_name?: string;
+  } | null;
+  artifact_available?: boolean;
+  artifact_type?: 'success' | 'partial' | 'full' | null;
+  artifact_name?: string | null;
+  download_url?: string | null;
 }
 
 export interface RunEvent {
@@ -347,6 +361,7 @@ export interface HealthStatus {
 export interface ProviderHealth {
   key: string;
   display_name: string;
+  role_group?: string;
   model: string;
   priority: number;
   status: 'healthy' | 'degraded' | 'cooling_down' | 'unconfigured' | 'disabled';
@@ -356,6 +371,7 @@ export interface ProviderHealth {
   requests: number;
   successes: number;
   failures: number;
+  rate_limits?: number;
   retries: number;
   failovers_from: number;
   failovers_to: number;

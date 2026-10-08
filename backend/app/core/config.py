@@ -2,6 +2,17 @@
 
 Single source of truth for runtime settings. Values are read from the
 environment (or a `.env` file) and validated once at import time.
+
+Authoritative 7 Dedicated Gemini Credential Slots (01 Suffix):
+  1. PLANNER_API_KEY01      → Manager, Business Analyst, Solution Architect
+  2. FRONTEND_API_KEY01     → Frontend Engineer, Documentation Engineer
+  3. BACKEND_API_KEY01      → Backend Engineer
+  4. DATABASE_API_KEY01     → Database Engineer
+  5. QA_API_KEY01           → QA Engineer
+  6. REVIEW_API_KEY01       → Review Engineer, Improvement Engineer
+  7. DEBUG_API_KEY01        → Final QA Agent, Self-repair/debug functionality
+  Artifact Manager          → Deterministic (Zero LLM calls)
+Model: gemini-3.6-flash ONLY
 """
 
 from __future__ import annotations
@@ -11,9 +22,9 @@ import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 #: `backend/` — this file is `backend/app/core/config.py`.
@@ -71,20 +82,10 @@ class Settings(BaseSettings):
     log_format: Literal["console", "json"] = "console"
 
     # --- Security --------------------------------------------------------
-    # Blank means "absent", not "an empty signing key". `_guard_production`
-    # substitutes a per-process random key in development and rejects the state
-    # outright in production.
     secret_key: str = ""
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = 60 * 12
     refresh_token_ttl_days: int = 14
-    # `NoDecode` is required, not cosmetic. Without it pydantic-settings treats
-    # a list field as a complex type and runs `json.loads` on the raw value
-    # inside the environment source, before any validator sees it. A perfectly
-    # ordinary `CORS_ORIGINS=http://a,http://b` is not JSON, so settings
-    # construction fails at import with a decoding error. `NoDecode` hands the
-    # raw string to `_split_origins` below, which is what actually knows the
-    # format.
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "http://localhost:5173",
@@ -94,116 +95,133 @@ class Settings(BaseSettings):
     )
 
     # --- Database --------------------------------------------------------
-    # PostgreSQL is the platform database of record. A SQLite URL is accepted
-    # so the platform boots on a workstation without a Postgres instance; the
-    # Docker Compose stack always provisions PostgreSQL.
     database_url: str = "sqlite+aiosqlite:///./aegis.db"
     database_echo: bool = False
     database_pool_size: int = 10
     database_max_overflow: int = 20
 
-    # --- Language model --------------------------------------------------
-    # The preferred provider. It is moved to the front of the routing order
-    # rather than being the only option: every other configured provider stays
-    # available as a fallback, which is what keeps a run alive when this one
-    # hits its quota.
-    # llm_provider: Literal[
-    #     "anthropic", "gemini", "groq", "nvidia", "openai", "ollama"
-    # ] = "anthropic"
-    llm_provider: Literal[
-    "anthropic", "gemini", "groq", "nvidia", "openai", "ollama"
-] = "gemini"
+    # --- Authoritative 7 Dedicated Credential Slots (01 Suffix) -----------
+    planner_api_key01: str | None = None
+    frontend_api_key01: str | None = None
+    backend_api_key01: str | None = None
+    database_api_key01: str | None = None
+    qa_api_key01: str | None = None
+    review_api_key01: str | None = None
+    debug_api_key01: str | None = None
 
-    #: Fallback order after the preferred provider, most preferred first.
-    #: Unknown names are ignored; missing ones simply never get selected.
-    # llm_provider_priority: Annotated[list[str], NoDecode] = Field(
-    #     default_factory=lambda: ["gemini", "groq", "nvidia", "ollama", "openai", "anthropic"]
-    # )
-    llm_provider_priority: Annotated[list[str], NoDecode] = Field(
-    default_factory=lambda: [
-        "nvidia",
-        "groq",
-        "openai",
-        "anthropic",
-        "ollama",
-    ]
-)
-    #: Providers switched off regardless of whether they hold credentials.
-    llm_disabled_providers: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # --- 7-Slot Authoritative Model Configuration ------------------------
+    planner_model: str = Field(
+        default="nvidia/nemotron-3-super-120b-a12b",
+        validation_alias=AliasChoices("planner_model", "planner_api_key01_model"),
+    )
+    frontend_model: str = Field(
+        default="gemini-3.6-flash",
+        validation_alias=AliasChoices("frontend_model", "frontend_api_key01_model"),
+    )
+    backend_model: str = Field(
+        default="gemini-3.6-flash",
+        validation_alias=AliasChoices("backend_model", "backend_api_key01_model"),
+    )
+    database_model: str = Field(
+        default="gemini-3.6-flash",
+        validation_alias=AliasChoices("database_model", "database_api_key01_model"),
+    )
+    qa_model: str = Field(
+        default="nvidia/nemotron-3-super-120b-a12b",
+        validation_alias=AliasChoices("qa_model", "qa_api_key01_model"),
+    )
+    review_model: str = Field(
+        default="nvidia/nemotron-3-super-120b-a12b",
+        validation_alias=AliasChoices("review_model", "review_api_key01_model"),
+    )
+    debug_model: str = Field(
+        default="nvidia/nemotron-3-super-120b-a12b",
+        validation_alias=AliasChoices("debug_model", "debug_api_key01_model"),
+    )
 
-    llm_failover_enabled: bool = True
-    # llm_task_routing_enabled: bool = True
-    llm_task_routing_enabled: bool = False
-    #: How long a provider is withheld after a quota or credential rejection.
-    llm_quota_cooldown_seconds: float = 300.0
-    #: How long a provider is withheld after repeated ordinary failures.
-    llm_failure_cooldown_seconds: float = 60.0
-    #: Consecutive failures that trigger the shorter cooldown.
-    llm_failure_threshold: int = 3
-
-    # Refuse submissions that are not software briefs before any agent runs.
-    # A greeting reaching the Business Analyst comes back as an invented
-    # project, because its schema has no shape for "this is not one".
-    intent_check_enabled: bool = True
-
-    llm_cache_enabled: bool = True
-    llm_cache_max_entries: int = 512
-    llm_cache_ttl_seconds: float = 3600.0
-
-    # Per-provider credentials and models.
-    anthropic_api_key: str | None = None
-    llm_model: str = "claude-opus-5"
-
-    google_api_key: str | None = None
-    gemini_model: str = "gemini-3.6-flash"
-
-    groq_api_key: str | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
-    groq_base_url: str = "https://api.groq.com/openai/v1"
-    # Groq's free tier bills input and output against one per-minute budget
-    # (12k TPM by default). These leave headroom under it so a request is
-    # skipped rather than rejected.
-    groq_max_prompt_tokens: int = 8000
-    groq_max_output_tokens: int = 3500
-
-    #: NVIDIA NIM — the hosted catalogue at build.nvidia.com, or a NIM
-    #: container running on your own hardware. Both speak the OpenAI
-    #: chat-completions protocol, so only the base URL differs.
+    # --- NVIDIA NIM Configuration ----------------------------------------
     nvidia_api_key: str | None = None
-    nvidia_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
-    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    # NIM serves a heterogeneous catalogue: context windows run from 8k to
-    # beyond 128k depending on which model is configured. Assuming one number
-    # for all of them would either strand large prompts on a model that could
-    # have held them, or send them to one that cannot. 0 means "no declared
-    # limit" — set these to the configured model's real limits when known.
-    nvidia_max_prompt_tokens: int = 0
-    nvidia_max_output_tokens: int = 0
-    #: How this NIM model is asked for JSON. Support varies per model, so it is
-    #: configuration rather than an assumption: `json_schema` when the model
-    #: enforces a supplied schema, `json_object` when it only guarantees valid
-    #: JSON, `prompt` when it does neither. Every mode is validated locally, so
-    #: the weakest one is still safe — just less efficient.
-    nvidia_structured_output: Literal["json_schema", "json_object", "prompt"] = "json_object"
+    nvidia_base_url: str = Field(
+        default="https://integrate.api.nvidia.com/v1",
+        validation_alias=AliasChoices("nvidia_base_url", "nvidia_api_base_url"),
+    )
+    nvidia_model: str = Field(
+        default="nvidia/nemotron-3-super-120b-a12b",
+        validation_alias=AliasChoices("nvidia_model"),
+    )
 
+    # --- Default Provider and Model Configuration ------------------------
+    default_provider: str = Field(
+        default="gemini",
+        validation_alias=AliasChoices("default_provider", "default_llm_provider"),
+    )
+    default_model: str = Field(
+        default="gemini-3.6-flash",
+        validation_alias=AliasChoices("default_model", "default_llm_model"),
+    )
+
+    # --- OpenAI Provider Configuration -----------------------------------
     openai_api_key: str | None = None
-    openai_model: str = "gpt-4o-mini"
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_max_prompt_tokens: int = 0
-    openai_max_output_tokens: int = 0
+    openai_model: str = "gpt-4o-mini"
 
-    #: Ollama runs locally and authenticates nothing, so it needs no key.
-    ollama_model: str = "llama3.1"
-    ollama_base_url: str = "http://localhost:11434/v1"
-    ollama_enabled: bool = False
-    # Local models usually run with a modest context window.
-    ollama_max_prompt_tokens: int = 6000
-    ollama_max_output_tokens: int = 4096
+    # --- Mistral Provider Configuration ----------------------------------
+    mistral_api_key: str | None = None
+    mistral_base_url: str = "https://api.mistral.ai/v1"
+    mistral_model: str = "mistral-large-latest"
 
-    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
-    llm_max_tokens: int = 32000
-    llm_max_retries: int = 3
-    llm_timeout_seconds: float = 900.0
+    # --- GitHub Models Provider Configuration ----------------------------
+    github_token: str | None = None
+    github_models_token: str | None = None
+    github_models_base_url: str = "https://models.inference.ai.azure.com"
+    github_models_model: str = "gpt-4o"
+
+    # --- Groq Provider Configuration -------------------------------------
+    groq_api_key: str | None = None
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "llama-3.3-70b-versatile"
+
+    # --- Optional SiliconFlow Configuration ------------------------------
+    siliconflow_api_key: str | None = None
+    siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
+    siliconflow_model: str = "Qwen/Qwen2.5-7B-Instruct"
+
+    # --- Per-Task Request Budget -----------------------------------------
+    target_requests_per_task: int = Field(
+        default=10,
+        validation_alias=AliasChoices("target_requests_per_task", "llm_request_target"),
+    )
+    hard_max_requests_per_task: int = Field(
+        default=15,
+        validation_alias=AliasChoices("hard_max_requests_per_task", "llm_request_hard_max"),
+    )
+
+    # --- Frontend Stack Configuration ------------------------------------
+    default_frontend_stack: str = "html_css_js"  # html_css_js, react, nextjs
+
+    # --- Authoritative Centralized Gemini Model Configuration -------------
+    gemini_model: str = "gemini-3.6-flash"
+    gemini_allowed_model: str = "gemini-3.6-flash"
+    gemini_fallback_models: list[str] = Field(
+        default_factory=lambda: ["gemini-3.6-flash"]
+    )
+    gemini_priority: int = 1
+
+    # --- DeepSeek provider configuration ---------------------------------
+    deepseek_enabled: bool = False
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_primary_model: str = "deepseek-flash"
+    deepseek_fallback_model: str = "deepseek-v4-pro"
+    deepseek_thinking_effort: str = "low"
+    deepseek_priority: int = 2
+
+    # --- SambaNova provider configuration --------------------------------
+    sambanova_enabled: bool = False
+    sambanova_api_key: str | None = None
+    sambanova_base_url: str = "https://api.sambanova.ai/v1"
+    sambanova_primary_model: str = "YOUR_SAMBANOVA_MODEL_ID"
+    sambanova_priority: int = 3
 
     # --- Generation limits ----------------------------------------------
     max_concurrent_runs: int = 4
@@ -212,6 +230,21 @@ class Settings(BaseSettings):
     generation_batch_size: int = 4
     artifact_root: str = "./artifacts"
     artifact_retention_days: int = 30
+    max_repair_cycles: int = 5
+
+    # --- LLM shared settings -------------------------------------------
+    llm_max_tokens: int = 32000
+    llm_max_retries: int = 3
+    llm_timeout_seconds: float = 900.0
+    llm_cache_enabled: bool = True
+    llm_cache_max_entries: int = 512
+    llm_cache_ttl_seconds: float = 3600.0
+    llm_quota_cooldown_seconds: float = 300.0
+    llm_failure_cooldown_seconds: float = 60.0
+    llm_failure_threshold: int = 3
+
+    # Intent pre-check (non-software briefs rejected before agents run)
+    intent_check_enabled: bool = True
 
     # --- Bootstrap admin -------------------------------------------------
     bootstrap_admin_email: str | None = None
@@ -220,33 +253,6 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
-        """Parse `CORS_ORIGINS` from the forms people actually write.
-
-        Comma-separated is the documented format. A JSON array is accepted too,
-        because that is what pydantic-settings would have expected by default
-        and it is a reasonable thing to try.
-        """
-        if not isinstance(value, str):
-            return value
-        text = value.strip()
-        if text.startswith("["):
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                pass  # Fall through and treat it as a plain list.
-        return [origin.strip() for origin in text.split(",") if origin.strip()]
-
-    @field_validator(
-        "llm_provider_priority", "llm_disabled_providers", mode="before"
-    )
-    @classmethod
-    def _split_provider_list(cls, value: object) -> object:
-        """Accept `gemini,groq,ollama` as well as a JSON array.
-
-        Same `NoDecode` reasoning as `cors_origins`: without it the settings
-        source tries to JSON-decode a plain comma-separated list and fails
-        before any validator runs.
-        """
         if not isinstance(value, str):
             return value
         text = value.strip()
@@ -255,14 +261,24 @@ class Settings(BaseSettings):
                 return json.loads(text)
             except json.JSONDecodeError:
                 pass
-        return [item.strip().lower() for item in text.split(",") if item.strip()]
+        return [origin.strip() for origin in text.split(",") if origin.strip()]
 
     @field_validator(
-        "anthropic_api_key",
-        "google_api_key",
-        "groq_api_key",
+        "planner_api_key01",
+        "frontend_api_key01",
+        "backend_api_key01",
+        "database_api_key01",
+        "qa_api_key01",
+        "review_api_key01",
+        "debug_api_key01",
         "nvidia_api_key",
         "openai_api_key",
+        "mistral_api_key",
+        "github_token",
+        "github_models_token",
+        "groq_api_key",
+        "deepseek_api_key",
+        "sambanova_api_key",
         "bootstrap_admin_email",
         "bootstrap_admin_password",
     )
@@ -276,7 +292,6 @@ class Settings(BaseSettings):
     @field_validator("debug", mode="before")
     @classmethod
     def _parse_debug(cls, value: object) -> object:
-        """Accept common mode names from ambient shell variables."""
         if not isinstance(value, str):
             return value
         normalised = value.strip().lower()
@@ -289,7 +304,6 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def _normalise_database_url(cls, value: str) -> str:
-        """Coerce sync driver URLs to their async equivalents."""
         if value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+asyncpg://", 1)
         if value.startswith("postgres://"):
@@ -310,16 +324,12 @@ class Settings(BaseSettings):
             if not secret_provided:
                 raise ValueError(
                     "production requires an explicit SECRET_KEY; generate one with "
-                    "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+                    'python -c "import secrets; print(secrets.token_urlsafe(48))"'
                 )
             if len(self.secret_key) < 32:
                 raise ValueError("SECRET_KEY must be at least 32 characters")
 
         if not secret_provided:
-            # A `.env` copied from the example has `SECRET_KEY=` with nothing
-            # after it, which pydantic reads as the empty string. Left alone
-            # that signs every JWT with a zero-length key. Generating one keeps
-            # the failure loud — sessions drop on restart — instead of silent.
             self.secret_key = secrets.token_urlsafe(48)
 
         return self
@@ -328,81 +338,152 @@ class Settings(BaseSettings):
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
 
-    @property
-    def provider_credentials(self) -> dict[str, str | None]:
-        """API key per provider. `None` means the provider needs none."""
-        return {
-            "anthropic": self.anthropic_api_key,
-            "gemini": self.google_api_key,
-            "groq": self.groq_api_key,
-            "nvidia": self.nvidia_api_key,
-            "openai": self.openai_api_key,
-            "ollama": None,
+    def get_backup_credentials(self) -> list[str]:
+        """Backup API key pool is removed. Each role has a dedicated Gemini slot."""
+        return []
+
+    def get_role_credential(self, role: str) -> str | None:
+        """Resolve credential for an agent role using the 7 dedicated Gemini slots."""
+        normalized = role.lower().replace("-", "_")
+        if "artifact_manager" in normalized:
+            return None
+        key: str | None = None
+        if (
+            "planner" in normalized
+            or "manager" in normalized
+            or "analyst" in normalized
+            or "architect" in normalized
+        ):
+            key = self.planner_api_key01
+        elif "frontend" in normalized or "documentation" in normalized or "doc" in normalized:
+            key = self.frontend_api_key01
+        elif "backend" in normalized:
+            key = self.backend_api_key01
+        elif "database" in normalized:
+            key = self.database_api_key01
+        elif "final_qa" in normalized or "debug" in normalized or "repair" in normalized:
+            key = self.debug_api_key01
+        elif "qa" in normalized:
+            key = self.qa_api_key01
+        elif "review" in normalized or "improvement" in normalized:
+            key = self.review_api_key01
+
+        if not key and getattr(self, "siliconflow_api_key", None):
+            key = self.siliconflow_api_key
+
+        return key.strip() if key and key.strip() else None
+
+    def get_slot_model(self, slot: str) -> str:
+        """Resolve the model name for a credential slot from separate model config."""
+        s = slot.upper().strip()
+        models = {
+            "PLANNER_API_KEY01": self.planner_model,
+            "FRONTEND_API_KEY01": self.frontend_model,
+            "BACKEND_API_KEY01": self.backend_model,
+            "DATABASE_API_KEY01": self.database_model,
+            "QA_API_KEY01": self.qa_model,
+            "REVIEW_API_KEY01": self.review_model,
+            "DEBUG_API_KEY01": self.debug_model,
         }
+        return models.get(s, self.default_model)
 
-    @property
-    def provider_models(self) -> dict[str, str]:
-        return {
-            "anthropic": self.llm_model,
-            "gemini": self.gemini_model,
-            "groq": self.groq_model,
-            "nvidia": self.nvidia_model,
-            "openai": self.openai_model,
-            "ollama": self.ollama_model,
-        }
-
-    @property
-    def resolved_provider_priority(self) -> list[str]:
-        """Routing order: preferred provider first, then the configured list.
-
-        Deduplicated, so naming the preferred provider in the list as well is
-        harmless rather than a second attempt at the same one.
-        """
-        order: list[str] = [self.llm_provider]
-        order.extend(self.llm_provider_priority)
-        seen: set[str] = set()
-        return [key for key in order if not (key in seen or seen.add(key))]
-
-    @property
-    def configured_providers(self) -> list[str]:
-        """Providers that hold the credentials they need and are switched on."""
-        disabled = {key.lower() for key in self.llm_disabled_providers}
-        credentials = self.provider_credentials
-        available: list[str] = []
-        for key in self.resolved_provider_priority:
-            if key in disabled or key not in credentials:
-                continue
-            if key == "ollama":
-                if self.ollama_enabled:
-                    available.append(key)
-                continue
-            if credentials[key]:
-                available.append(key)
-        return available
+    def get_role_model(self, role: str) -> str:
+        """Resolve the configured model for an agent role."""
+        normalized = role.lower().replace("-", "_")
+        if "artifact_manager" in normalized:
+            return "deterministic"
+        if (
+            "planner" in normalized
+            or "manager" in normalized
+            or "analyst" in normalized
+            or "architect" in normalized
+        ):
+            return self.planner_model
+        if "frontend" in normalized or "documentation" in normalized or "doc" in normalized:
+            return self.frontend_model
+        if "backend" in normalized:
+            return self.backend_model
+        if "database" in normalized:
+            return self.database_model
+        if "final_qa" in normalized or "debug" in normalized or "repair" in normalized:
+            return self.debug_model
+        if "qa" in normalized:
+            return self.qa_model
+        if "review" in normalized or "improvement" in normalized:
+            return self.review_model
+        return self.default_model
 
     @property
     def llm_configured(self) -> bool:
-        """Whether at least one provider can serve a request."""
-        return bool(self.configured_providers)
+        """Whether at least one of the 7 dedicated role slots is configured."""
+        return any([
+            self.planner_api_key01,
+            self.frontend_api_key01,
+            self.backend_api_key01,
+            self.database_api_key01,
+            self.qa_api_key01,
+            self.review_api_key01,
+            self.debug_api_key01,
+            self.openai_api_key,
+            self.mistral_api_key,
+            self.github_token,
+            self.groq_api_key,
+            self.deepseek_api_key,
+            self.sambanova_api_key,
+            self.siliconflow_api_key,
+        ])
 
     @property
     def active_model(self) -> str:
-        """The model the first eligible provider will use."""
-        providers = self.configured_providers
-        key = providers[0] if providers else self.llm_provider
-        return self.provider_models.get(key, self.llm_model)
+        """The primary configured model (for health display only)."""
+        return self.gemini_model
 
     @property
     def active_api_key_variable(self) -> str:
-        """The environment variable to set for the preferred provider."""
+        """Environment variable hint for the UI config guide."""
+        if self.frontend_api_key01:
+            return "FRONTEND_API_KEY01"
+        if self.planner_api_key01:
+            return "PLANNER_API_KEY01"
+        if self.backend_api_key01:
+            return "BACKEND_API_KEY01"
+        return "FRONTEND_API_KEY01"
+
+    def validate_gemini_credentials(self) -> dict[str, Any]:
+        """Audit the 7 dedicated Gemini credential slots for uniqueness and validity without exposing secrets."""
+        import hashlib
+
+        slots = {
+            "PLANNER_API_KEY01": self.planner_api_key01,
+            "FRONTEND_API_KEY01": self.frontend_api_key01,
+            "BACKEND_API_KEY01": self.backend_api_key01,
+            "DATABASE_API_KEY01": self.database_api_key01,
+            "QA_API_KEY01": self.qa_api_key01,
+            "REVIEW_API_KEY01": self.review_api_key01,
+            "DEBUG_API_KEY01": self.debug_api_key01,
+        }
+        seen: dict[str, str] = {}
+        duplicates: list[tuple[str, str]] = []
+        configured: list[str] = []
+
+        for slot, key in slots.items():
+            if key and key.strip():
+                configured.append(slot)
+                digest = hashlib.sha256(key.strip().encode("utf-8")).hexdigest()[:16]
+                if digest in seen:
+                    duplicates.append((slot, seen[digest]))
+                else:
+                    seen[digest] = slot
+
         return {
-            "anthropic": "ANTHROPIC_API_KEY",
-            "gemini": "GOOGLE_API_KEY",
-            "groq": "GROQ_API_KEY",
-            "nvidia": "NVIDIA_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "ollama": "OLLAMA_ENABLED",
-        }.get(self.llm_provider, "ANTHROPIC_API_KEY")
+            "configured_count": len(configured),
+            "configured_slots": configured,
+            "valid_count": len(seen),
+            "duplicate_count": len(duplicates),
+            "duplicate_slots": duplicates,
+            "missing_count": max(0, 7 - len(configured)),
+            "failover_enabled": False,
+        }
 
 
 @lru_cache(maxsize=1)

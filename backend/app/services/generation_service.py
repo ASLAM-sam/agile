@@ -10,6 +10,7 @@ recommended stack. It is a single, bounded model call.
 from __future__ import annotations
 
 from typing import Any
+import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +20,14 @@ from app.agents.context import AgentContext
 from app.agents.registry import get_agent_registry
 from app.core.config import settings
 from app.core.enums import AgentRole, LogLevel, RunStatus
-from app.core.exceptions import ConfigurationError, NotFoundError, RateLimitError, ValidationError
+from app.core.exceptions import (
+    AegisError,
+    ConfigurationError,
+    LLMError,
+    NotFoundError,
+    RateLimitError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.llm.factory import build_llm_provider
 from app.llm.protocol import LLMProvider
@@ -104,12 +112,13 @@ class GenerationService:
         if llm is None:
             raise ConfigurationError(
                 f"{settings.active_api_key_variable} is not configured, so requirements "
-                f"cannot be analysed. Set it in backend/.env for the selected provider "
-                f"({settings.llm_provider})."
+                f"cannot be analysed. Set at least one API key in backend/.env "
+                f"(e.g. FRONTEND_API_KEY, BACKEND_API_KEY, or provider-specific keys)."
             )
 
+        analysis_run_id = f"analysis_{project.id}_{uuid.uuid4().hex[:8]}"
         memory = SharedProjectMemory(
-            run_id="analysis",
+            run_id=analysis_run_id,
             project_id=project.id,
             project_name=project.name,
             project_slug=project.slug,
@@ -122,7 +131,16 @@ class GenerationService:
             report_progress=_noop_progress,
             report_log=_noop_log,
         )
-        await BusinessAnalystAgent().execute(ctx)
+        try:
+            await BusinessAnalystAgent().execute(ctx)
+        except AegisError:
+            raise
+        except Exception as exc:
+            logger.exception("analysis_execution_failed", extra={"project_id": project.id})
+            raise LLMError(
+                f"Requirements analysis failed: {exc}",
+                details={"project_id": project.id, "error": str(exc)},
+            ) from exc
 
         logger.info(
             "analysis_complete",

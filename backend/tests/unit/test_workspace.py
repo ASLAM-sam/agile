@@ -155,3 +155,23 @@ class TestWorkspaceQueries:
         assert len(workspace) == 0
         assert workspace.tree() == "(empty)"
         assert workspace.summary_for_prompt() == "(no files yet)"
+
+
+class TestPackageExclusions:
+    def test_sensitive_and_unwanted_files_are_excluded_from_zip(self) -> None:
+        from app.packaging.zip_builder import _is_excluded_from_package
+
+        assert _is_excluded_from_package(".env")
+        assert _is_excluded_from_package("backend/.env")
+        assert _is_excluded_from_package("backend/.env.production")
+        assert _is_excluded_from_package("frontend/node_modules/react/index.js")
+        assert _is_excluded_from_package(".venv/bin/python")
+        assert _is_excluded_from_package(".git/HEAD")
+        assert _is_excluded_from_package("backend/__pycache__/app.pyc")
+        assert _is_excluded_from_package(".pytest_cache/v/cache/lastfailed")
+
+        # Legitimate templates must be retained
+        assert not _is_excluded_from_package(".env.example")
+        assert not _is_excluded_from_package("backend/.env.example")
+        assert not _is_excluded_from_package("src/main.tsx")
+        assert not _is_excluded_from_package("package.json")

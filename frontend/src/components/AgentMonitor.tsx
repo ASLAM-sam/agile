@@ -24,9 +24,28 @@ export function AgentMonitor({ agents }: { agents: AgentExecution[] }) {
   );
 }
 
+const AGENT_PROVIDER_INFO: Record<string, { account: string; model: string }> = {
+  manager: { account: 'PLANNER_API_KEY01 (Slot 01)', model: 'gemini-3.6-flash' },
+  business_analyst: { account: 'PLANNER_API_KEY01 (Slot 01)', model: 'gemini-3.6-flash' },
+  solution_architect: { account: 'PLANNER_API_KEY01 (Slot 01)', model: 'gemini-3.6-flash' },
+  frontend_engineer: { account: 'FRONTEND_API_KEY01 (Slot 02)', model: 'gemini-3.6-flash' },
+  documentation_engineer: { account: 'FRONTEND_API_KEY01 (Slot 02)', model: 'gemini-3.6-flash' },
+  backend_engineer: { account: 'BACKEND_API_KEY01 (Slot 03)', model: 'gemini-3.6-flash' },
+  database_engineer: { account: 'DATABASE_API_KEY01 (Slot 04)', model: 'gemini-3.6-flash' },
+  qa_engineer: { account: 'QA_API_KEY01 (Slot 05)', model: 'gemini-3.6-flash' },
+  review_engineer: { account: 'REVIEW_API_KEY01 (Slot 06)', model: 'gemini-3.6-flash' },
+  improvement_engineer: { account: 'REVIEW_API_KEY01 (Slot 06)', model: 'gemini-3.6-flash' },
+  final_qa: { account: 'DEBUG_API_KEY01 (Slot 07)', model: 'gemini-3.6-flash' },
+  artifact_manager: { account: 'Deterministic', model: 'No LLM' },
+};
+
 function AgentRow({ agent }: { agent: AgentExecution }) {
   const isRunning = agent.status === 'running';
   const isSkipped = agent.status === 'skipped';
+  const providerInfo = AGENT_PROVIDER_INFO[agent.role] ?? {
+    account: 'Gemini Slot',
+    model: 'gemini-3.6-flash',
+  };
 
   const tone =
     agent.status === 'completed'
@@ -57,14 +76,19 @@ function AgentRow({ agent }: { agent: AgentExecution }) {
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-3">
-            <p
-              className={cn(
-                'truncate text-sm font-medium',
-                isSkipped ? 'text-content-subtle' : 'text-content',
-              )}
-            >
-              {agent.display_name}
-            </p>
+            <div>
+              <p
+                className={cn(
+                  'truncate text-sm font-medium',
+                  isSkipped ? 'text-content-subtle' : 'text-content',
+                )}
+              >
+                {agent.display_name}
+              </p>
+              <p className="font-mono text-[11px] text-content-muted">
+                {providerInfo.account} · {providerInfo.model}
+              </p>
+            </div>
             <div className="flex shrink-0 items-center gap-2">
               {agent.duration_seconds ? (
                 <span className="font-mono text-[11px] tabular-nums text-content-subtle">

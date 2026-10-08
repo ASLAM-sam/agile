@@ -2,6 +2,13 @@
 
 The single place that knows which engineers exist. The workflow engine reads
 this to build an execution plan; nothing else enumerates agents.
+
+Canonical execution order:
+  Manager → BA → Architect → DB → Backend → Frontend
+  → QA → Review → Improvement → Final QA → Docs → Artifact Manager
+
+The Final QA step after Improvement is mandatory: Improvement can introduce
+regressions, so the final state must be independently validated before ZIP.
 """
 
 from __future__ import annotations
@@ -12,6 +19,7 @@ from app.agents.base import Agent
 from app.agents.business_analyst import BusinessAnalystAgent
 from app.agents.database_engineer import DatabaseEngineerAgent
 from app.agents.documentation_engineer import DocumentationEngineerAgent
+from app.agents.final_qa_agent import FinalQAAgent
 from app.agents.frontend_engineer import FrontendEngineerAgent
 from app.agents.improvement_engineer import ImprovementEngineerAgent
 from app.agents.manager import ManagerAgent
@@ -33,6 +41,7 @@ DEFAULT_SEQUENCE: tuple[type[Agent], ...] = (
     QAEngineerAgent,
     ReviewEngineerAgent,
     ImprovementEngineerAgent,
+    FinalQAAgent,               # ← NEW: mandatory post-improvement validation
     DocumentationEngineerAgent,
     ArtifactManagerAgent,
 )

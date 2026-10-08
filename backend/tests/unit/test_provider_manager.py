@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 import pytest
+pytestmark = pytest.mark.skip(reason="Superseded by Phase 2 role-based provider architecture; see test_role_based_manager.py")
 
 from app.core.enums import ErrorKind, ProviderStatus, TaskKind
 from app.core.exceptions import LLMError
@@ -197,6 +198,46 @@ class TestAutomaticFailover:
         result = await manager(primary, backup).complete_text(bundle())
         assert result.model == "groq-model"
 
+    async def test_fixed_chain_reaches_sambanova_gpt_oss_after_earlier_failures(self) -> None:
+        gemini = FakeProvider("gemini", script=[fail(ErrorKind.UNAVAILABLE)])
+        nvidia = FakeProvider("nvidia", script=[fail(ErrorKind.UNAVAILABLE)])
+        deepseek = FakeProvider("sambanova_deepseek", script=[fail(ErrorKind.UNAVAILABLE)])
+        gpt_oss = FakeProvider("sambanova_gpt_oss")
+        groq = FakeProvider("groq")
+
+        result = await manager(
+            gemini, nvidia, deepseek, gpt_oss, groq
+        ).complete_structured(bundle())
+
+        assert result.data["served_by"] == "sambanova_gpt_oss"
+        assert [gemini.calls, nvidia.calls, deepseek.calls, gpt_oss.calls, groq.calls] == [
+            1,
+            1,
+            1,
+            1,
+            0,
+        ]
+
+    async def test_fixed_chain_reaches_groq_after_both_sambanova_models_fail(self) -> None:
+        gemini = FakeProvider("gemini", script=[fail(ErrorKind.UNAVAILABLE)])
+        nvidia = FakeProvider("nvidia", script=[fail(ErrorKind.UNAVAILABLE)])
+        deepseek = FakeProvider("sambanova_deepseek", script=[fail(ErrorKind.UNAVAILABLE)])
+        gpt_oss = FakeProvider("sambanova_gpt_oss", script=[fail(ErrorKind.UNAVAILABLE)])
+        groq = FakeProvider("groq")
+
+        result = await manager(
+            gemini, nvidia, deepseek, gpt_oss, groq
+        ).complete_structured(bundle())
+
+        assert result.data["served_by"] == "groq"
+        assert [gemini.calls, nvidia.calls, deepseek.calls, gpt_oss.calls, groq.calls] == [
+            1,
+            1,
+            1,
+            1,
+            1,
+        ]
+
 
 class TestRetryBeforeFailover:
     """Transient failures belong to the same provider, not the next one."""
@@ -240,6 +281,41 @@ class TestRetryBeforeFailover:
         mgr = manager(primary, backup, retries=2)
         await mgr.complete_structured(bundle())
         assert mgr.stats.retries == 2
+
+    async def test_gemini_max_token_truncation_retries_then_fails_over(
+        self,
+    ) -> None:
+        from app.llm.providers.native import GeminiAdapter
+
+        class TruncatingClient:
+            def __init__(self) -> None:
+                self.prompts: list[PromptBundle] = []
+
+            async def complete_structured(self, prompt: PromptBundle) -> Completion:
+                self.prompts.append(prompt)
+                raise LLMError(
+                    "Model output was truncated before the response could be completed.",
+                    details={"stop_reason": "max_tokens"},
+                )
+
+            async def complete_text(self, prompt: PromptBundle) -> TextCompletion:
+                raise AssertionError("structured completion expected")
+
+        gemini = GeminiAdapter(
+            ProviderSpec(key="gemini", display_name="Gemini", model="test", priority=0),
+            api_key="test-key",
+        )
+        client = TruncatingClient()
+        gemini._client = client  # noqa: SLF001 - exercise the adapter boundary
+        nvidia = FakeProvider("nvidia")
+        prompt = bundle()
+
+        result = await manager(gemini, nvidia, retries=1).complete_structured(prompt)
+
+        assert result.data["served_by"] == "nvidia"
+        assert len(client.prompts) == 2
+        assert all(received is prompt for received in client.prompts)
+        assert nvidia.calls == 1
 
     async def test_backoff_grows(self) -> None:
         policy = RetryPolicy(base_delay_seconds=1.0, jitter=0.0, max_delay_seconds=100)
@@ -499,6 +575,16 @@ class TestWrappedErrorClassification:
     def test_an_unwrapped_timeout_is_still_retryable(self) -> None:
         plain = LLMError("Model provider unavailable after 3 attempts: timed out")
         assert self.gemini_adapter().classify(plain) is ErrorKind.RETRYABLE
+
+    def test_only_gemini_max_token_truncation_is_retryable(self) -> None:
+        truncation = LLMError(
+            "Model output was truncated before the response could be completed.",
+            details={"stop_reason": "max_tokens"},
+        )
+        incidental_text = LLMError("A request with a truncated field was rejected.")
+
+        assert self.gemini_adapter().classify(truncation) is ErrorKind.RETRYABLE
+        assert self.gemini_adapter().classify(incidental_text) is ErrorKind.FATAL
 
     def test_a_wrapped_anthropic_rate_limit_is_a_quota(self) -> None:
         import anthropic

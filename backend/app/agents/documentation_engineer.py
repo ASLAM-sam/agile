@@ -125,7 +125,7 @@ symptom and the fix."""
                 ),
                 schema=DOCS_SCHEMA,
                 include_files=False,
-                max_tokens=32000,
+                max_tokens=8000,
             )
         )
 

@@ -65,6 +65,10 @@ export function ErrorState({
   className?: string;
 }) {
   const problems = error instanceof ApiError ? error.validationProblems : [];
+  const detailsReason =
+    error instanceof ApiError && typeof error.details?.['reason'] === 'string'
+      ? error.details['reason']
+      : null;
 
   return (
     <div
@@ -89,6 +93,9 @@ export function ErrorState({
       </div>
       <div className="max-w-md">
         <p className="text-sm font-medium text-content">{error.message}</p>
+        {detailsReason ? (
+          <p className="mt-1 text-xs text-content-muted break-words">{detailsReason}</p>
+        ) : null}
         {problems.length > 0 ? (
           <ul className="mt-2 space-y-1 text-xs text-content-muted">
             {problems.map((problem) => (

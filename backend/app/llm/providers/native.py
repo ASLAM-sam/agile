@@ -1,13 +1,15 @@
-"""Adapters for the two vendors with first-party SDK clients.
+"""Adapters for the vendors with first-party or specialised clients.
 
-`LLMClient` and `GeminiClient` already work and are already tested. These
-adapters wrap them rather than reimplementing them — the only thing added is
-failure classification, which the manager needs and the clients had no reason
+`LLMClient` (Anthropic) and `GeminiClient` already work and are already tested.
+`GroqClient` wraps the Groq API via the OpenAI-compatible endpoint.
+
+These adapters wrap them rather than reimplementing them — the only thing added
+is failure classification, which the manager needs and the clients had no reason
 to expose.
 
-Both are constructed with `max_retries=0`. Retrying is the `RetryManager`'s
-job now; leaving it switched on here as well would multiply attempts instead
-of composing them.
+All are constructed with max_retries=0 when used through the manager (which
+handles retries). The clients themselves may still perform internal retries
+for the standalone use case.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from app.core.enums import ErrorKind
-from app.core.exceptions import ConfigurationError
+from app.core.exceptions import ConfigurationError, LLMError
 from app.llm.providers.base import ProviderAdapter, ProviderSpec
 from app.llm.types import Completion, PromptBundle, TextCompletion
 
@@ -61,14 +63,7 @@ class _SdkAdapter(ProviderAdapter):
 
     @staticmethod
     def _chain(error: BaseException, *, limit: int = 5) -> list[BaseException]:
-        """The error and everything it was raised from.
-
-        Both clients run an internal retry loop that wraps the last transport
-        failure in a generic `LLMError`. Classifying only the outer exception
-        reads an exhausted quota as an ordinary timeout — which then earns no
-        cooldown, so every remaining agent in the run pays another round trip
-        to rediscover the same empty quota.
-        """
+        """The error and everything it was raised from."""
         chain: list[BaseException] = []
         current: BaseException | None = error
         while current is not None and len(chain) < limit:
@@ -78,13 +73,7 @@ class _SdkAdapter(ProviderAdapter):
 
     @staticmethod
     def _classify_common(error: BaseException) -> ErrorKind | None:
-        """Classification both clients share.
-
-        Both translate provider-level problems — rejected key, exhausted
-        credit or quota, missing model — into `ConfigurationError`. Every one
-        of those means *this* provider cannot serve the request while another
-        one might, which is precisely a failover.
-        """
+        """Classification shared across all adapters."""
         if isinstance(error, ConfigurationError):
             message = str(error).lower()
             if "quota" in message or "credit" in message or "rate limit" in message:
@@ -127,24 +116,39 @@ class AnthropicAdapter(_SdkAdapter):
         if "unavailable after" in message:
             return ErrorKind.RETRYABLE
         if "declined this request" in message:
-            # A refusal is about this model's judgement, not the request's
-            # validity — another vendor may well answer it.
             return ErrorKind.UNAVAILABLE
         return ErrorKind.FATAL
 
 
 class GeminiAdapter(_SdkAdapter):
-    """Google Gemini, via `app.llm.gemini.GeminiClient`."""
+    """Google Gemini, via `app.llm.gemini.GeminiClient`.
+
+    Each role slot gets its own adapter instance with its own API key.
+    """
+
+    def __init__(
+        self, spec: ProviderSpec, *, api_key: str | None, slot_name: str = "gemini"
+    ) -> None:
+        super().__init__(spec, api_key=api_key)
+        self._slot_name = slot_name
 
     def _build_client(self) -> LLMProvider:
         from app.llm.gemini import GeminiClient
 
-        return GeminiClient(api_key=self._api_key, model=self.model, max_retries=0)
+        return GeminiClient(
+            api_key=self._api_key,
+            model=self.model,
+            max_retries=0,
+            slot_name=self._slot_name,
+        )
 
     def classify(self, error: BaseException) -> ErrorKind:
         common = self._classify_common(error)
         if common is not None:
             return common
+
+        if isinstance(error, LLMError) and error.details.get("stop_reason") == "max_tokens":
+            return ErrorKind.RETRYABLE
 
         from google.genai import errors as genai_errors
 
@@ -167,4 +171,41 @@ class GeminiAdapter(_SdkAdapter):
             return ErrorKind.RETRYABLE
         if "declined this request" in message:
             return ErrorKind.UNAVAILABLE
+        return ErrorKind.FATAL
+
+
+class GroqAdapter(_SdkAdapter):
+    """Groq, via `app.llm.groq.GroqClient`."""
+
+    def _build_client(self) -> LLMProvider:
+        from app.llm.groq import GroqClient
+
+        return GroqClient(
+            api_key=self._api_key,
+            model=self.model,
+            base_url="https://api.groq.com/openai/v1",
+            max_retries=0,
+        )
+
+    def classify(self, error: BaseException) -> ErrorKind:
+        common = self._classify_common(error)
+        if common is not None:
+            return common
+
+        message = str(error).lower()
+        status = getattr(error, "status_code", None)
+
+        if status in (401, 403) or "api key" in message or "unauthorized" in message:
+            return ErrorKind.AUTH
+        if status == 429 or "rate limit" in message or "quota" in message:
+            return ErrorKind.QUOTA
+        if status == 404 or ("not found" in message and "model" in message):
+            return ErrorKind.UNAVAILABLE
+        if status and isinstance(status, int) and 500 <= status < 600:
+            return ErrorKind.RETRYABLE
+        if "timeout" in message or "connection" in message:
+            return ErrorKind.RETRYABLE
+        if "declined" in message or "refused" in message:
+            return ErrorKind.UNAVAILABLE
+
         return ErrorKind.FATAL

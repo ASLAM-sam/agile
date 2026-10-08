@@ -240,7 +240,7 @@ class TestFullStackRun:
         self, memory, adapters, full_stack_responses
     ) -> None:
         memory.tech_stack = TechStack(
-            frontend="react", backend="fastapi", database="postgresql", authentication="JWT"
+            frontend="react", backend="fastapi", database="sqlite", authentication="JWT"
         )
         llm = StubLLM(full_stack_responses)
         ctx = make_context(memory, llm, adapters)
@@ -279,7 +279,7 @@ class TestFullStackRun:
         self, memory, adapters, full_stack_responses, tmp_path
     ) -> None:
         memory.tech_stack = TechStack(
-            frontend="react", backend="fastapi", database="postgresql", authentication="JWT"
+            frontend="react", backend="fastapi", database="sqlite", authentication="JWT"
         )
         llm = StubLLM(full_stack_responses)
         ctx = make_context(memory, llm, adapters)

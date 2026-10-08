@@ -180,10 +180,15 @@ class BackendAdapter(TechnologyAdapter):
 
 
 class DatabaseAdapter(TechnologyAdapter):
-    """A relational database engine."""
+    """A generated-project database engine."""
 
     kind = AdapterKind.DATABASE
     requires_service = True
+    schema_filename = "schema.sql"
+    seed_filename = "seed.sql"
+    migration_extension = ".sql"
+    comment_prefix = "--"
+    catalogue_priority = 100
 
     @abstractmethod
     def connection_url(self, ctx: ScaffoldContext, *, host: str = "localhost") -> str:

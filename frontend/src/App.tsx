@@ -15,6 +15,7 @@ import { RunDetailPage } from '@/pages/RunDetailPage';
 import { RunsPage } from '@/pages/RunsPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { TeamPage } from '@/pages/TeamPage';
+import { UsageDashboardPage } from '@/pages/UsageDashboardPage';
 
 export function App() {
   return (
@@ -39,6 +40,7 @@ export function App() {
               <Route path="/runs" element={<RunsPage />} />
               <Route path="/runs/:runId" element={<RunDetailPage />} />
               <Route path="/providers" element={<ProvidersPage />} />
+              <Route path="/usage" element={<UsageDashboardPage />} />
               <Route path="/team" element={<TeamPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>

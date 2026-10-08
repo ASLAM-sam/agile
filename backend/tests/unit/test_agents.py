@@ -106,7 +106,7 @@ class TestSkipDecisions:
         self, memory, stub_llm, adapters
     ) -> None:
         memory.analysis = RequirementAnalysis(needs_database=True)
-        memory.tech_stack = TechStack(database="postgresql")
+        memory.tech_stack = TechStack(database="sqlite")
 
         assert not DatabaseEngineerAgent().should_execute(
             self._ctx(memory, stub_llm, adapters)
@@ -202,7 +202,7 @@ class TestArtifactManager:
             needs_database=True, needs_api=True, needs_backend=True, needs_frontend=True
         )
         memory.tech_stack = TechStack(
-            frontend="react", backend="fastapi", database="postgresql"
+            frontend="react", backend="fastapi", database="sqlite"
         )
         memory.workspace.write("README.md", "# Project")
         memory.workspace.write("backend/app/main.py", "app = FastAPI()")
@@ -219,7 +219,7 @@ class TestArtifactManager:
 
         compose = memory.workspace.read("docker-compose.yml") or ""
         assert "services:" in compose
-        assert "db:" in compose and "api:" in compose and "web:" in compose
+        assert "db:" not in compose and "api:" in compose and "web:" in compose
 
     async def test_warns_about_a_missing_readme(self, memory, stub_llm, adapters) -> None:
         memory.analysis = RequirementAnalysis(needs_backend=False, needs_frontend=True)

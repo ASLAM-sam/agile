@@ -85,8 +85,11 @@ export const runApi = {
 
   cancel: (id: string) => api.post<{ message: string }>(`/runs/${id}/cancel`),
 
-  download: (id: string, slug: string) =>
-    downloadFile(`/runs/${id}/download`, `${slug || 'project'}.zip`),
+  download: (id: string, fallbackName?: string, customPath?: string) => {
+    const name = fallbackName?.endsWith('.zip') ? fallbackName : `${fallbackName || 'project'}.zip`;
+    const path = customPath && customPath.trim() !== '' ? customPath : `/runs/${id}/download`;
+    return downloadFile(path, name);
+  },
 };
 
 export const artifactApi = {
@@ -109,4 +112,27 @@ export const providerApi = {
 
   reset: (key: string) =>
     api.post<{ key: string; cleared: boolean; message: string }>(`/providers/${key}/reset`),
+};
+
+export const usageApi = {
+  logs: (params: { task_id?: string; run_id?: string; agent_role?: string; limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (params.task_id) query.set('task_id', params.task_id);
+    if (params.run_id) query.set('run_id', params.run_id);
+    if (params.agent_role) query.set('agent_role', params.agent_role);
+    query.set('limit', String(params.limit ?? 50));
+    query.set('offset', String(params.offset ?? 0));
+    return api.get<Paged<any>>(`/usage/logs?${query.toString()}`, signal);
+  },
+
+  summary: (params: { task_id?: string; run_id?: string } = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (params.task_id) query.set('task_id', params.task_id);
+    if (params.run_id) query.set('run_id', params.run_id);
+    return api.get<any>(`/usage/summary?${query.toString()}`, signal);
+  },
+
+  quota: (signal?: AbortSignal) => api.get<any>('/usage/quota', signal),
+
+  credentials: (signal?: AbortSignal) => api.get<any[]>('/usage/credentials', signal),
 };

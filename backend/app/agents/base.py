@@ -25,6 +25,7 @@ from app.core.exceptions import AgentExecutionError
 from app.core.logging import get_logger
 from app.llm.schema import FILE_BUNDLE_SCHEMA, FILE_PLAN_SCHEMA
 from app.llm.types import PromptBundle, TokenUsage
+from app.packaging.workspace import normalise_path
 
 logger = get_logger(__name__)
 
@@ -172,6 +173,17 @@ class CodeAgent(Agent):
                 details={"planned": [str(e.get("path")) for e in planned[:10]]},
             )
 
+        # Deduplicate planned file paths deterministically (BUG 2)
+        seen_planned: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for entry in valid:
+            p = normalise_path(str(entry.get("path", "")))
+            if p not in seen_planned:
+                seen_planned.add(p)
+                entry["path"] = p
+                deduped.append(entry)
+        valid = deduped
+
         valid.sort(key=lambda entry: int(entry.get("priority", 99)))
         rationale = str(completion.data.get("rationale", ""))
         if rationale:
@@ -196,11 +208,24 @@ class CodeAgent(Agent):
         progress_from: int = 20,
         progress_to: int = 90,
         extra_instruction: str = "",
+        config_context: str = "",
+        protected_paths: set[str] | frozenset[str] | None = None,
     ) -> tuple[int, TokenUsage, list[str]]:
         """Phase 2 — generate file contents in ordered batches.
 
         Returns (files written, cumulative usage, warnings).
         """
+        # Ensure planned paths are unique and normalized before batching
+        seen_plan: set[str] = set()
+        clean_planned: list[dict[str, Any]] = []
+        for p in planned:
+            norm_p = normalise_path(str(p.get("path", "")))
+            if norm_p not in seen_plan:
+                seen_plan.add(norm_p)
+                p["path"] = norm_p
+                clean_planned.append(p)
+        planned = clean_planned
+
         size = batch_size or settings.generation_batch_size
         batches = [planned[i : i + size] for i in range(0, len(planned), size)]
         total_usage = TokenUsage()
@@ -222,7 +247,11 @@ class CodeAgent(Agent):
             )
             already = ctx.memory.workspace.summary_for_prompt(limit=60)
 
-            instruction = (
+            instruction_blocks: list[str] = []
+            if config_context:
+                instruction_blocks.append(config_context)
+
+            instruction_blocks.append(
                 "Generate the complete contents of exactly these files, and no "
                 f"others:\n\n{manifest}\n\n"
                 "Requirements for this batch:\n"
@@ -235,7 +264,9 @@ class CodeAgent(Agent):
                 f"FILES THAT ALREADY EXIST:\n{already}"
             )
             if extra_instruction:
-                instruction = f"{instruction}\n\n{extra_instruction}"
+                instruction_blocks.append(extra_instruction)
+
+            instruction = "\n\n".join(instruction_blocks)
 
             completion = await ctx.llm.complete_structured(
                 self.build_prompt(
@@ -247,13 +278,55 @@ class CodeAgent(Agent):
             )
             total_usage = total_usage + completion.usage
 
-            files = completion.data.get("files", [])
-            if not isinstance(files, list):
+            raw_files = completion.data.get("files", [])
+            if not isinstance(raw_files, list):
                 warnings.append(f"Batch {index} returned no usable files.")
                 continue
 
+            batch_paths = {normalise_path(str(entry.get("path", ""))) for entry in batch}
+            filtered_files: list[dict[str, Any]] = []
+            seen_in_batch: set[str] = set()
+
+            for f in raw_files:
+                if not isinstance(f, dict):
+                    continue
+                raw_p = str(f.get("path", "")).strip()
+                if not raw_p:
+                    continue
+                try:
+                    norm_p = normalise_path(raw_p)
+                except Exception as exc:
+                    msg = f"Rejected invalid file path '{raw_p}': {exc}"
+                    warnings.append(msg)
+                    await ctx.log(self.role, msg, level=LogLevel.WARNING)
+                    continue
+
+                if norm_p in seen_in_batch:
+                    continue
+                seen_in_batch.add(norm_p)
+
+                # Path safety: reject attempts to overwrite protected scaffold files
+                if protected_paths and norm_p in protected_paths:
+                    msg = f"Rejected {norm_p}: cannot overwrite protected scaffold file"
+                    warnings.append(msg)
+                    await ctx.log(self.role, msg, level=LogLevel.WARNING)
+                    continue
+
+                # Path safety: ensure path is inside output root if output_root is configured
+                if self.output_root and not norm_p.startswith(f"{self.output_root}/"):
+                    msg = f"Rejected {norm_p}: path must be inside '{self.output_root}/'"
+                    warnings.append(msg)
+                    await ctx.log(self.role, msg, level=LogLevel.WARNING)
+                    continue
+
+                # Prevent duplicate generation of files already written unless explicitly planned in this batch
+                if ctx.memory.workspace.exists(norm_p) and norm_p not in batch_paths:
+                    continue
+                f["path"] = norm_p
+                filtered_files.append(f)
+
             accepted, rejected = ctx.memory.workspace.write_many(
-                files, produced_by=self.role
+                filtered_files, produced_by=self.role
             )
             written += len(accepted)
 

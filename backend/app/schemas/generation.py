@@ -71,6 +71,18 @@ class AgentExecutionResponse(APIModel):
     finished_at: datetime | None = None
 
 
+class RunArtifactInfo(APIModel):
+    """Information about the downloadable package archive."""
+
+    available: bool = True
+    type: str = "full"  # "full" | "partial"
+    name: str = "project.zip"
+    download_url: str = ""
+    artifact_available: bool = True
+    artifact_type: str = "full"
+    artifact_name: str = "project.zip"
+
+
 class RunSummary(APIModel):
     """Run as shown in list views."""
 
@@ -83,6 +95,12 @@ class RunSummary(APIModel):
     duration_seconds: float | None
     created_at: datetime
     finished_at: datetime | None
+    release_eligible: bool = False
+    artifact: RunArtifactInfo | None = None
+    artifact_available: bool = False
+    artifact_type: str | None = None
+    artifact_name: str | None = None
+    download_url: str | None = None
 
 
 class RunDetail(RunSummary):

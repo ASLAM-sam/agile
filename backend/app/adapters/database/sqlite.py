@@ -21,6 +21,7 @@ class SQLiteAdapter(DatabaseAdapter):
         "Deployments where operating a database server is unwarranted",
     )
     requires_service = False
+    catalogue_priority = 2
 
     def connection_url(self, ctx: ScaffoldContext, *, host: str = "localhost") -> str:
         return f"sqlite:///./{ctx.package_name}.db"
@@ -98,8 +99,8 @@ for f in database/migrations/*.sql; do sqlite3 {ctx.package_name}.db < "$f"; don
 - `PRAGMA foreign_keys = ON` must be issued on every connection; the schema
   file sets it, and the application configures it at connection time.
 - The database file is git-ignored. Delete it to start from a clean slate.
-- SQLite serialises writes. For concurrent write workloads, migrate to
-  PostgreSQL — the schema is portable with minor type substitutions.
+- SQLite serialises writes. For concurrent, document-oriented workloads,
+  choose MongoDB when selecting the generated-project stack.
 """,
             )
         ]

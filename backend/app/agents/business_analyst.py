@@ -226,7 +226,9 @@ assumption would produce something actively wrong."""
                     f"requirements specification:\n\n{ctx.memory.idea}\n\n"
                     "Think carefully about which capabilities this specific "
                     "project genuinely needs before deciding. Justify every "
-                    "capability decision in the rationale."
+                    "capability decision in the rationale. If the idea explicitly "
+                    "specifies client-only architecture, browser localStorage or no backend "
+                    "services, set needs_database=false, needs_backend=false, and needs_api=false."
                 ),
                 schema=ANALYSIS_SCHEMA,
                 include_files=False,

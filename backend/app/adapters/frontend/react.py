@@ -25,11 +25,15 @@ class ReactAdapter(FrontendAdapter):
 
     def scaffold(self, ctx: ScaffoldContext) -> list[ScaffoldFile]:
         deps = {
+            "clsx": "^2.1.1",
+            "lucide-react": "^0.460.0",
             "react": "^18.3.1",
             "react-dom": "^18.3.1",
             "react-router-dom": "^6.28.0",
+            "tailwind-merge": "^2.5.4",
         }
         dev_deps = {
+            "@types/node": "^20.17.0",
             "@types/react": "^18.3.12",
             "@types/react-dom": "^18.3.1",
             "@vitejs/plugin-react": "^4.3.3",
@@ -57,7 +61,7 @@ class ReactAdapter(FrontendAdapter):
                 "preview": "vite preview",
                 "test": "vitest run",
                 "test:watch": "vitest",
-                "typecheck": "tsc --noEmit",
+                "typecheck": "tsc --noEmit -p tsconfig.app.json",
             },
             "dependencies": dict(sorted(deps.items())),
             "devDependencies": dict(sorted(dev_deps.items())),
@@ -72,7 +76,8 @@ class ReactAdapter(FrontendAdapter):
             ScaffoldFile(
                 path="frontend/vite.config.ts",
                 description="Vite build and dev-server configuration.",
-                content=f"""import {{ defineConfig }} from 'vite';
+                content=f"""/// <reference types="vitest" />
+import {{ defineConfig }} from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
 
@@ -162,7 +167,7 @@ export default defineConfig({{
                             "lib": ["ES2023"],
                             "module": "ESNext",
                             "moduleResolution": "bundler",
-                            "types": ["node"],
+                            "types": ["node", "vitest/globals"],
                             "strict": True,
                             "skipLibCheck": True,
                             "isolatedModules": True,
@@ -234,6 +239,44 @@ export default {
                 path="frontend/src/test/setup.ts",
                 description="Vitest setup importing jest-dom matchers.",
                 content="import '@testing-library/jest-dom';\n",
+            ),
+            ScaffoldFile(
+                path="frontend/src/main.tsx",
+                description="Client entrypoint mounting the root React application.",
+                content="""import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+""",
+            ),
+            ScaffoldFile(
+                path="frontend/src/index.css",
+                description="Global Tailwind styles and typography directives.",
+                content="""@tailwind base;
+@tailwind components;
+@tailwind utilities;
+""",
+            ),
+            ScaffoldFile(
+                path="frontend/src/App.tsx",
+                description="Root application shell component.",
+                content=f"""import React from 'react';
+
+export default function App(): JSX.Element {{
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6">
+      <h1 className="text-3xl font-bold text-brand-400">{ctx.project_name}</h1>
+      <p className="mt-2 text-slate-400">{ctx.description}</p>
+    </div>
+  );
+}}
+""",
             ),
             ScaffoldFile(
                 path="frontend/.env.example",
